@@ -163,13 +163,15 @@ bool ESP32Video::Init()
         return false;
     }
 
-    // Zero both framebuffers once — top/bottom padding rows stay black forever.
+    // Zero framebuffer(s) — padding rows stay black forever.
     // Update() only writes the active area [OFF_Y .. OFF_Y+SCALED_H).
     size_t fb_size = DST_W * DST_H * 3;
     memset(fb0, 0, fb_size);
-    memset(fb1, 0, fb_size);
     esp_cache_msync(fb0, fb_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-    esp_cache_msync(fb1, fb_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    if (fb1) {
+        memset(fb1, 0, fb_size);
+        esp_cache_msync(fb1, fb_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    }
 
     BuildPalette();
     // Mark all rows dirty for the first frame
