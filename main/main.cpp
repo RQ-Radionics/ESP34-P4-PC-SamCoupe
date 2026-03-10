@@ -30,9 +30,18 @@
 
 static const char* TAG = "simcoupe";
 
-// 256 KB PSRAM stack for the emulation task.
-// CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y allows PSRAM stacks.
-#define SIMCOUPE_TASK_STACK_BYTES  (256 * 1024)
+// Stack for the emulation task — must be in internal DRAM, NOT PSRAM.
+//
+// WHY NOT PSRAM: sim_display_flush() calls esp_cache_msync(DIR_C2M) to
+// writeback the framebuffer. On ESP32-P4 this can transiently invalidate
+// cache lines covering the active task stack if it lives in PSRAM, corrupting
+// local variables and return addresses mid-function. Symptom: Load access
+// fault inside fs::directory_iterator() when the GUI file browser refreshes
+// its listing after Enter is pressed (SamCoupe-8mh).
+//
+// 32 KB DRAM is sufficient: SimCoupe's large buffers (framebuffer, ROM, RAM)
+// are heap-allocated in PSRAM. The call stack depth is modest (~2-3 KB peak).
+#define SIMCOUPE_TASK_STACK_BYTES  (32 * 1024)
 
 static void simcoupe_task(void* /*arg*/)
 {
@@ -121,15 +130,24 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "SimCoupe ESP32-P4-PC starting (free heap: %lu bytes)",
              (unsigned long)esp_get_free_heap_size());
 
-    // Spawn the emulation task with a large PSRAM stack.
-    // Priority 5 = above idle, below time-critical drivers.
-    BaseType_t ret = xTaskCreate(
+    // Spawn the emulation task on Core 1, pinned away from USB (Core 0).
+    //
+    // Priority 15: above USB lib (10) and USB client (5), below IPC/timer (22+).
+    // This ensures the Z80 emulation loop is never preempted by USB host tasks.
+    //
+    // Core 1: USB lib and USB client are pinned to Core 0. Pinning simcoupe
+    // to Core 1 gives the Z80 a dedicated core with no USB scheduling noise.
+    //
+    // Stack in internal DRAM (see SIMCOUPE_TASK_STACK_BYTES comment above).
+    // xTaskCreatePinnedToCore with a DRAM stack does NOT need EXT_MEM flag.
+    BaseType_t ret = xTaskCreatePinnedToCore(
         simcoupe_task,
         "simcoupe",
         SIMCOUPE_TASK_STACK_BYTES,
         nullptr,
-        5,
-        nullptr);
+        15,
+        nullptr,
+        1);  /* Core 1 — dedicated to Z80 emulation */
 
     if (ret != pdPASS)
         ESP_LOGE(TAG, "Failed to create simcoupe task!");
