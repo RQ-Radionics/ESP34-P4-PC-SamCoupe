@@ -1,0 +1,3 @@
+## sim_display component
+## esp_lcd_lt8912b is provided locally in components/esp_lcd_lt8912b/
+dependencies: {}

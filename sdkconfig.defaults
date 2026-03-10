@@ -1,46 +1,147 @@
-# SimCoupe ESP32 — common SDK defaults
-# Target-specific settings go in sdkconfig.defaults.<target>
+# SimCoupe — Olimex ESP32-P4-PC SDK configuration
+# Single file: this project targets only the Olimex ESP32-P4-PC board.
 
-# Custom partition table
+# ── DW-GDMA: ISR + objects in IRAM/DRAM ──────────────────────────────────
+# The DW-GDMA ISR fires during esp_cache_msync() (display flush).
+# Without IRAM-safe ISR + DRAM-safe objects, the ISR reads the channel
+# object from PSRAM while the cache is being flushed → Load access fault
+# (dev=0x0 in dw_gdma_channel_default_isr, MTVAL=0x188).
+#
+# DW_GDMA_ISR_IRAM_SAFE and DW_GDMA_OBJ_DRAM_SAFE are hidden Kconfig symbols
+# (no "prompt", cannot be set directly from sdkconfig.defaults).
+# The correct path is via the visible LCD DSI symbol:
+#   LCD_DSI_ISR_CACHE_SAFE → selects DW_GDMA_ISR_IRAM_SAFE
+#                           → selects DW_GDMA_OBJ_DRAM_SAFE
+# This puts the DW-GDMA channel/group objects in DRAM and the ISR in IRAM.
+CONFIG_LCD_DSI_ISR_CACHE_SAFE=y
+
+# ── Partition table ────────────────────────────────────────────────────────
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
-# FreeRTOS tick rate — 1000 Hz for better timing resolution
+# ── Chip: ESP32-P4NRW32 rev 1.x ───────────────────────────────────────────
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_1=y
+CONFIG_ESP32P4_REV_MIN_FULL=1
+
+# ── Flash: 16 MB ──────────────────────────────────────────────────────────
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# ── PSRAM: Hex-line 200 MHz ────────────────────────────────────────────────
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_HEX=y
+CONFIG_SPIRAM_SPEED_200M=y
+# Allow global BSS to be placed in PSRAM via ldgen extram_bss mapping
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+# Allow FreeRTOS tasks to be created with stacks in PSRAM
+CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
+# Allocations <= 64KB go to internal SRAM; larger ones go to PSRAM
+# Increased from 16KB to ensure filesystem locks, semaphores, and other
+# small kernel objects stay in DRAM (not PSRAM) to avoid cache coherency issues
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=65536
+
+# ── Console: USB Serial/JTAG (USB-C on the board) ─────────────────────────
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# ── FreeRTOS ───────────────────────────────────────────────────────────────
 CONFIG_FREERTOS_HZ=1000
 
-# PSRAM — required for FrameBuffer, Z80 RAM, DPI framebuffers
-CONFIG_SPIRAM=y
-CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
-CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
-
-# Main task stack — app_main only does NVS init + spawns simcoupe_task
+# ── Stack sizes ────────────────────────────────────────────────────────────
+# app_main only does NVS init + spawns simcoupe_task
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
-
-# sys_evt task stack — needs extra room with PSRAM/logging overhead
+# sys_evt task needs extra room with PSRAM/logging overhead
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
 
-# Log level: INFO
+# ── Logging ────────────────────────────────────────────────────────────────
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_DEFAULT_LEVEL=3
 
-# Task watchdog — do NOT check IDLE tasks.
+# ── Task watchdog ──────────────────────────────────────────────────────────
 # The emulation loop legitimately saturates CPUs; IDLE starvation WDT
 # fires spuriously and causes DMA crashes.
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
 
-# Console: UART0 (overridden to USB-JTAG in olimex-p4pc defaults)
-CONFIG_ESP_CONSOLE_UART_DEFAULT=y
-CONFIG_ESP_CONSOLE_UART_NUM=0
-CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
-
-# C++ exceptions — disable to save flash/RAM (SimCoupe uses no exceptions)
-# CONFIG_COMPILER_CXX_EXCEPTIONS is not set
-
-# FAT filesystem + Wear Levelling (for SPIFFS/FAT on flash)
+# ── FAT filesystem + Wear Levelling ───────────────────────────────────────
 CONFIG_FATFS_SECTOR_512=y
 CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_MAX_LFN=255
 CONFIG_WL_SECTOR_SIZE_512=y
 CONFIG_WL_SECTOR_MODE_PERF=y
+
+# ── USB host (keyboard via USB HID) ───────────────────────────────────────
+CONFIG_USB_HOST_HUBS_SUPPORTED=y
+CONFIG_USB_HOST_HUB_MULTI_LEVEL=y
+
+# ── I2S ISR + GDMA objects in IRAM/DRAM ──────────────────────────────────
+# The I2S DMA TX callback (i2s_dma_tx_callback) fires from the AHB-GDMA ISR.
+# The I2S channel object (including msg_queue) is allocated in PSRAM by default.
+# When esp_cache_msync() flushes PSRAM, the ISR reads msg_queue=NULL → assert.
+# CONFIG_I2S_ISR_IRAM_SAFE=y selects GDMA_ISR_HANDLER_IN_IRAM → GDMA_OBJ_DRAM_SAFE,
+# putting the AHB-GDMA channel objects in DRAM and the ISR in IRAM.
+CONFIG_I2S_ISR_IRAM_SAFE=y
+
+# ── I2C ISR in IRAM ───────────────────────────────────────────────────────
+# Prevents ESP_ERR_INVALID_STATE when flash cache is busy during I2C transfers
+CONFIG_I2C_MASTER_ISR_HANDLER_IN_IRAM=y
+
+# ── esp-hosted / WiFi coprocessor: not present on this board ──────────────
+# CONFIG_ESP_HOSTED_ENABLED is not set
+
+# ── ES8311 audio codec (I2S + I2C) ────────────────────────────────────────
+# I2C1 SDA=GPIO7 SCL=GPIO8, I2S1 GPIO9-13, PWR=GPIO6, PA=GPIO53
+CONFIG_SIM_AUDIO_ENABLED=y
+CONFIG_SIM_AUDIO_I2C_PORT=1
+CONFIG_SIM_AUDIO_I2C_SDA_GPIO=7
+CONFIG_SIM_AUDIO_I2C_SCL_GPIO=8
+CONFIG_SIM_AUDIO_PWR_GPIO=6
+CONFIG_SIM_AUDIO_PA_GPIO=53
+CONFIG_SIM_AUDIO_I2S_NUM=1
+CONFIG_SIM_AUDIO_I2S_DOUT_GPIO=9
+CONFIG_SIM_AUDIO_I2S_WS_GPIO=10
+CONFIG_SIM_AUDIO_I2S_DIN_GPIO=11
+CONFIG_SIM_AUDIO_I2S_BCLK_GPIO=12
+CONFIG_SIM_AUDIO_I2S_MCLK_GPIO=13
+CONFIG_SIM_AUDIO_SAMPLE_RATE=44100
+
+# ── USB HID keyboard ───────────────────────────────────────────────────────
+# FE1.1s hub RST=GPIO21, OTG20 HS D+=GPIO27 D-=GPIO26
+CONFIG_SIM_KBD_ENABLED=y
+CONFIG_SIM_KBD_HUB_RST_GPIO=21
+CONFIG_SIM_KBD_USB_DP_GPIO=27
+CONFIG_SIM_KBD_USB_DM_GPIO=26
+
+# ── SD card (SDMMC 4-bit, Slot 0) ─────────────────────────────────────────
+# CLK=GPIO43 CMD=GPIO44 D0=GPIO39 D1=GPIO40 D2=GPIO41 D3=GPIO42
+# LDO_VO4 enabled in code (sd_pwr_ctrl_new_on_chip_ldo, chan 4)
+# GPIO pins are hard-coded in sim_sdcard.c — no Kconfig symbols needed.
+CONFIG_SIM_SDCARD_ENABLED=y
+
+# ── LT8912B HDMI bridge (MIPI DSI → HDMI) ─────────────────────────────────
+# I2C1 SDA=GPIO7 SCL=GPIO8 (shared with ES8311 audio codec)
+CONFIG_SIM_DISPLAY_ENABLED=y
+CONFIG_SIM_DISPLAY_I2C_PORT=1
+CONFIG_SIM_DISPLAY_SDA_GPIO=7
+CONFIG_SIM_DISPLAY_SCL_GPIO=8
+CONFIG_SIM_DISPLAY_HPD_GPIO=15
+CONFIG_SIM_DISPLAY_HDMI_MODE=y
+CONFIG_SIM_DISPLAY_DSI_LANES=2
+CONFIG_SIM_DISPLAY_DSI_LANE_MBPS=896
+# 1024×768@60Hz: pclk=60MHz (PLL_F240M/4 exact)
+CONFIG_SIM_DISPLAY_HACT=1024
+CONFIG_SIM_DISPLAY_VACT=768
+CONFIG_SIM_DISPLAY_PCLK_MHZ=60
+CONFIG_SIM_DISPLAY_HS=83
+CONFIG_SIM_DISPLAY_HFP=14
+CONFIG_SIM_DISPLAY_HBP=120
+CONFIG_SIM_DISPLAY_VS=6
+CONFIG_SIM_DISPLAY_VFP=3
+CONFIG_SIM_DISPLAY_VBP=29
+CONFIG_SIM_DISPLAY_HSYNC_POL=1
+CONFIG_SIM_DISPLAY_VSYNC_POL=0
+CONFIG_SIM_DISPLAY_SETTLE=0x08
+CONFIG_SIM_DISPLAY_DDS_0=0x93
+CONFIG_SIM_DISPLAY_DDS_1=0x3E
+CONFIG_SIM_DISPLAY_DDS_2=0x29

@@ -1,69 +1,136 @@
 /*
- * main.cpp — SimCoupe ESP32-P4-PC entry point (stub)
+ * main.cpp — SimCoupe ESP32-P4-PC entry point
  *
- * Boot sequence (final):
- *   1. NVS init (app_main, LP DRAM stack)
- *   2. Spawn simcoupe_task (PSRAM stack, 256 KB)
- *   3. HDMI init (LT8912B via MIPI DSI)
- *   4. Audio init (ES8311 via I2S + shared I2C bus)
- *   5. USB HID keyboard init
- *   6. SD card mount
- *   7. SimCoupe Main::Init()
- *   8. Emulation loop (50 Hz PAL)
- *
- * This file is currently a stub that verifies the ESP-IDF project
- * structure compiles correctly before the full port is implemented.
+ * Boot sequence:
+ *   1. NVS init (app_main, LP DRAM stack — required by NVS)
+ *   2. Spawn simcoupe_task (256 KB PSRAM stack)
+ *   3. HDMI init  — sim_display_init()
+ *   4. Audio init — sim_audio_init_with_bus(sim_display_get_i2c_bus())
+ *   5. SD card    — sim_sdcard_mount()
+ *   6. Keyboard   — sim_kbd_init() via Input::Init() inside Main::Init()
+ *   7. SimCoupe   — Main::Init(0, nullptr) → CPU::Run() (never returns)
  */
 
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_err.h"
 #include "nvs_flash.h"
 
-static const char *TAG = "simcoupe";
+// Hardware drivers
+#include "sim_display.h"
+#include "sim_audio.h"
+#include "sim_sdcard.h"
 
-/* 256 KB PSRAM stack for the main emulation task.
- * CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y lets xTaskCreate allocate
- * from PSRAM automatically when size > CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL. */
-#define SIMCOUPE_TASK_STACK_KB  256
+// SimCoupe core
+#include "SimCoupe.h"
+#include "Main.h"
+#include "CPU.h"
 
-static void simcoupe_task(void *arg)
+static const char* TAG = "simcoupe";
+
+// 256 KB PSRAM stack for the emulation task.
+// CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y allows PSRAM stacks.
+#define SIMCOUPE_TASK_STACK_BYTES  (256 * 1024)
+
+static void simcoupe_task(void* /*arg*/)
 {
-    ESP_LOGI(TAG, "SimCoupe task started (stub)");
+    ESP_LOGI(TAG, "SimCoupe task started");
 
-    /* TODO (T08): Full boot sequence:
-     *   sim_display_init()
-     *   sim_audio_init_with_bus(sim_display_get_i2c_bus())
-     *   sim_kbd_init(kbd_queue)
-     *   sim_sdcard_mount()
-     *   Main::Init(argc, argv)
-     *   emulation_loop()
-     */
-
-    while (1) {
-        ESP_LOGI(TAG, "SimCoupe stub running — full implementation pending");
-        vTaskDelay(pdMS_TO_TICKS(5000));
+    // ── 1. HDMI display ──────────────────────────────────────────────────────
+    ESP_LOGI(TAG, "Initializing display...");
+    esp_err_t err = sim_display_init();
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "sim_display_init failed: 0x%x — halting", err);
+        vTaskSuspend(nullptr);
     }
+    ESP_LOGI(TAG, "Display OK");
+
+    // ── 2. Audio (shares I2C bus with display) ───────────────────────────────
+    ESP_LOGI(TAG, "Initializing audio...");
+    i2c_master_bus_handle_t i2c_bus = sim_display_get_i2c_bus();
+    err = sim_audio_init_with_bus(i2c_bus);
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "sim_audio_init_with_bus failed: 0x%x — continuing without audio", err);
+        // Non-fatal: emulator can run silently
+    }
+    else
+    {
+        sim_audio_set_volume(80);
+        ESP_LOGI(TAG, "Audio OK");
+    }
+
+    // ── 3. SD card ───────────────────────────────────────────────────────────
+    ESP_LOGI(TAG, "Mounting SD card...");
+    err = sim_sdcard_mount();
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "sim_sdcard_mount failed: 0x%x — no disk images available", err);
+        // Non-fatal: emulator can run without SD card (ROM only)
+    }
+    else
+    {
+        ESP_LOGI(TAG, "SD card mounted at /sdcard");
+    }
+
+    // ── 4. SimCoupe init + emulation loop ────────────────────────────────────
+    // Main::Init() calls OSD::Init(), Frame::Init(), CPU::Init(), UI::Init(),
+    // Sound::Init(), Input::Init() (which calls sim_kbd_init()), Video::Init().
+    // Options::Load(0, nullptr) uses defaults + /sdcard/simcoupe/SimCoupe.cfg.
+    ESP_LOGI(TAG, "Starting SimCoupe...");
+
+    // argv[0] must be a valid string (Options::Load uses it as exe path)
+    static const char* argv0 = "simcoupe";
+    static char* argv[] = { const_cast<char*>(argv0), nullptr };
+    int argc = 1;
+
+    if (Main::Init(argc, argv))
+    {
+        ESP_LOGI(TAG, "SimCoupe running");
+        CPU::Run();   // Never returns under normal operation
+    }
+    else
+    {
+        ESP_LOGE(TAG, "Main::Init failed");
+    }
+
+    Main::Exit();
+    ESP_LOGE(TAG, "SimCoupe exited — restarting in 5s");
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    esp_restart();
 }
 
 extern "C" void app_main(void)
 {
-    /* NVS init — must run on LP DRAM stack (app_main default) */
+    // NVS init must run on the LP DRAM stack (app_main default).
+    // Erase and reinit if the partition is full or version changed.
     esp_err_t nvs_err = nvs_flash_init();
     if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES ||
-        nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    {
+        ESP_LOGW(TAG, "NVS erasing and reinitializing");
         nvs_flash_erase();
         nvs_err = nvs_flash_init();
     }
-    if (nvs_err != ESP_OK) {
-        ESP_LOGE(TAG, "NVS init failed: 0x%x", nvs_err);
-    }
+    if (nvs_err != ESP_OK)
+        ESP_LOGE(TAG, "NVS init failed: 0x%x (non-fatal)", nvs_err);
 
-    ESP_LOGI(TAG, "SimCoupe ESP32-P4-PC starting...");
+    ESP_LOGI(TAG, "SimCoupe ESP32-P4-PC starting (free heap: %lu bytes)",
+             (unsigned long)esp_get_free_heap_size());
 
-    /* Spawn main emulation task with large PSRAM stack */
-    xTaskCreate(simcoupe_task, "simcoupe",
-                SIMCOUPE_TASK_STACK_KB * 1024,
-                NULL, 5, NULL);
+    // Spawn the emulation task with a large PSRAM stack.
+    // Priority 5 = above idle, below time-critical drivers.
+    BaseType_t ret = xTaskCreate(
+        simcoupe_task,
+        "simcoupe",
+        SIMCOUPE_TASK_STACK_BYTES,
+        nullptr,
+        5,
+        nullptr);
+
+    if (ret != pdPASS)
+        ESP_LOGE(TAG, "Failed to create simcoupe task!");
 }

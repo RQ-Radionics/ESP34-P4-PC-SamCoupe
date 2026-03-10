@@ -1,0 +1,38 @@
+menu "SimCoupe Keyboard (USB HID)"
+
+config SIM_KBD_ENABLED
+    bool "Enable USB HID keyboard driver"
+    default n
+    help
+        Enable the sim_kbd driver which uses the USB host stack to receive
+        HID keyboard events from a USB keyboard connected via a FE1.1s hub.
+        Produces PS/2 Set 2 scancodes enqueued to a FreeRTOS queue.
+
+if SIM_KBD_ENABLED
+
+config SIM_KBD_HUB_RST_GPIO
+    int "GPIO for hub reset (HUB_RST#, active LOW)"
+    default 21
+    help
+        GPIO connected to the active-LOW reset pin of the FE1.1s USB hub.
+        The driver drives this HIGH (deassert reset) before starting the
+        USB host stack, and LOW briefly on shutdown.
+        Olimex ESP32-P4-PC: GPIO21.
+
+config SIM_KBD_USB_DP_GPIO
+    int "GPIO for USB D+ (OTG20 HS)"
+    default 27
+    help
+        GPIO used for D+ of the USB High-Speed PHY0 (OTG20).
+        On Olimex ESP32-P4-PC: GPIO27.
+
+config SIM_KBD_USB_DM_GPIO
+    int "GPIO for USB D- (OTG20 HS)"
+    default 26
+    help
+        GPIO used for D- of the USB High-Speed PHY0 (OTG20).
+        On Olimex ESP32-P4-PC: GPIO26.
+
+endif # SIM_KBD_ENABLED
+
+endmenu

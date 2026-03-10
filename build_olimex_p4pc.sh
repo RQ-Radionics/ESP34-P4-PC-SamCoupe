@@ -1,42 +1,39 @@
 #!/usr/bin/env bash
-# build_olimex_p4pc.sh — Build SimCoupe for Olimex ESP32-P4-PC (RISC-V RV32IMAFC)
-#
-# Uses ONLY sdkconfig.defaults (common) + sdkconfig.defaults.olimex-p4pc.
-# Does NOT include sdkconfig.defaults.esp32p4 (which enables the esp-hosted
-# C6 WiFi coprocessor and would trigger SDIO probing on a board without one).
+# build_olimex_p4pc.sh — Build SimCoupe for Olimex ESP32-P4-PC
 #
 # Usage:
-#   ./build_olimex_p4pc.sh          — build only
-#   ./build_olimex_p4pc.sh flash    — build + flash (auto-detect port)
-#   ./build_olimex_p4pc.sh monitor  — build + flash + monitor
+#   ./build_olimex_p4pc.sh              — incremental build
+#   ./build_olimex_p4pc.sh clean        — clean configure + build
+#   ./build_olimex_p4pc.sh flash        — incremental build + flash
+#   ./build_olimex_p4pc.sh monitor      — incremental build + flash + monitor
+#   ./build_olimex_p4pc.sh clean flash  — clean + build + flash
+#
+# Run with 'clean' after changing sdkconfig.defaults or adding components.
 set -e
 
 cd "$(dirname "$0")"
 
 echo "=== SimCoupe ESP32-P4-PC build ==="
 
-# Wipe cached sdkconfig and build/ to ensure a clean start.
-# SDKCONFIG_DEFAULTS overrides win because idf.py applies them after the
-# Kconfig defaults during the configure phase of `build`.
-rm -f sdkconfig
-rm -rf build
+if [[ "${*}" == *clean* ]]; then
+    echo "--- Clean configure ---"
+    rm -f sdkconfig
+    rm -rf build
+    idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults" set-target esp32p4
+fi
 
-export SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.olimex-p4pc"
-
-idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.olimex-p4pc" \
-    set-target esp32p4
-
-idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.olimex-p4pc" \
-    build
+idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults" build
 
 echo ""
 echo "=== Build complete ==="
 echo ""
 
 case "${1:-}" in
-    flash)
-        echo "Flashing..."
-        idf.py -p "${PORT:-/dev/cu.usbmodem*}" flash
+    flash|clean)
+        if [[ "${*}" == *flash* ]]; then
+            echo "Flashing..."
+            idf.py -p "${PORT:-/dev/cu.usbmodem*}" flash
+        fi
         ;;
     monitor)
         echo "Flashing and monitoring..."

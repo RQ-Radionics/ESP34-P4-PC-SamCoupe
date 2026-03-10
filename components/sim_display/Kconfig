@@ -1,0 +1,161 @@
+menu "SimCoupe Display (LT8912B HDMI Bridge)"
+    depends on IDF_TARGET_ESP32P4
+
+    config SIM_DISPLAY_ENABLED
+        bool "Enable LT8912B HDMI bridge driver"
+        default n
+        help
+            Enable the LT8912B MIPI DSI to HDMI bridge driver for SimCoupe.
+            Required for HDMI output on boards with an LT8912B chip
+            (e.g. Olimex ESP32-P4-PC).
+
+    if SIM_DISPLAY_ENABLED
+
+    config SIM_DISPLAY_I2C_PORT
+        int "I2C port number"
+        default 1
+        range 0 1
+        help
+            I2C port used to configure the LT8912B (sub-addresses 0x48/0x49/0x4A)
+            and ES8311 audio codec (0x18). Both share this bus.
+
+    config SIM_DISPLAY_SDA_GPIO
+        int "I2C SDA GPIO"
+        default 7
+        help
+            GPIO for I2C SDA. Olimex ESP32-P4-PC: GPIO7.
+
+    config SIM_DISPLAY_SCL_GPIO
+        int "I2C SCL GPIO"
+        default 8
+        help
+            GPIO for I2C SCL. Olimex ESP32-P4-PC: GPIO8.
+
+    config SIM_DISPLAY_HPD_GPIO
+        int "HDMI Hot-Plug Detect GPIO (-1 = disabled)"
+        default 15
+        range -1 56
+        help
+            GPIO for HDMI hot-plug detect. Olimex ESP32-P4-PC: GPIO15.
+
+    config SIM_DISPLAY_HDMI_MODE
+        bool "HDMI mode (vs DVI)"
+        default y
+        help
+            Enable HDMI mode (with audio info frame). Disable for DVI-only monitors.
+
+    config SIM_DISPLAY_DSI_LANES
+        int "DSI lane count"
+        default 2
+        range 1 2
+        help
+            Number of MIPI DSI data lanes.
+
+    config SIM_DISPLAY_DSI_LANE_MBPS
+        int "DSI lane bit rate (Mbps)"
+        default 896
+        help
+            MIPI DSI bit rate per lane in Mbps.
+            Must satisfy: lane_mbps >= pclk_mhz * 24 / num_lanes (with margin).
+            1024x768@60Hz/60MHz/2lanes: 60*24/2=720 Mbps → use 896 Mbps.
+
+    # ---------------------------------------------------------------
+    # Video timing — single source of truth for all timing parameters.
+    # ---------------------------------------------------------------
+
+    config SIM_DISPLAY_HACT
+        int "Horizontal active pixels"
+        default 1024
+        help
+            Horizontal active pixel count (e.g. 1024 for 1024x768).
+
+    config SIM_DISPLAY_VACT
+        int "Vertical active lines"
+        default 768
+        help
+            Vertical active line count (e.g. 768 for 1024x768).
+
+    config SIM_DISPLAY_PCLK_MHZ
+        int "Pixel clock (MHz)"
+        default 60
+        help
+            Pixel clock in MHz. Must be an exact divisor of the DPI clock source.
+            DPI clock source = PLL_F240M (240 MHz).
+            Valid exact values: 240/4=60, 240/5=48, 240/6=40, 240/8=30 MHz.
+            Use 60 MHz for 1024x768@60Hz.
+
+    config SIM_DISPLAY_HS
+        int "Horizontal sync width (pixels)"
+        default 83
+        help
+            Horizontal sync pulse width in pixels.
+
+    config SIM_DISPLAY_HFP
+        int "Horizontal front porch (pixels)"
+        default 14
+        help
+            Horizontal front porch in pixels.
+
+    config SIM_DISPLAY_HBP
+        int "Horizontal back porch (pixels)"
+        default 120
+        help
+            Horizontal back porch in pixels.
+
+    config SIM_DISPLAY_VS
+        int "Vertical sync width (lines)"
+        default 6
+        help
+            Vertical sync pulse width in lines.
+
+    config SIM_DISPLAY_VFP
+        int "Vertical front porch (lines)"
+        default 3
+        help
+            Vertical front porch in lines.
+
+    config SIM_DISPLAY_VBP
+        int "Vertical back porch (lines)"
+        default 29
+        help
+            Vertical back porch in lines.
+
+    config SIM_DISPLAY_HSYNC_POL
+        int "Horizontal sync polarity (1=positive, 0=negative)"
+        default 1
+        range 0 1
+
+    config SIM_DISPLAY_VSYNC_POL
+        int "Vertical sync polarity (1=positive, 0=negative)"
+        default 0
+        range 0 1
+
+    config SIM_DISPLAY_SETTLE
+        hex "MIPI DSI settle register (0x49:0x11)"
+        default 0x08
+        help
+            MIPI DSI settle time register value.
+            Upstream Linux kernel uses: 0x04 for vactive<=600, 0x08 for
+            vactive>600 (including 768), 0x0a for vactive==1080.
+
+    config SIM_DISPLAY_DDS_0
+        hex "DDS frequency word byte 0 (LSB, reg 0x4E)"
+        default 0x93
+        help
+            strm_sw_freq_word[7:0]. Espressif official value: 0x93.
+
+    config SIM_DISPLAY_DDS_1
+        hex "DDS frequency word byte 1 (reg 0x4F)"
+        default 0x3E
+        help
+            strm_sw_freq_word[15:8]. Espressif official value: 0x3E.
+
+    config SIM_DISPLAY_DDS_2
+        hex "DDS frequency word byte 2 (MSB, reg 0x50)"
+        default 0x29
+        help
+            strm_sw_freq_word[23:16]. Espressif official value: 0x29.
+
+    endif # SIM_DISPLAY_ENABLED
+
+endmenu

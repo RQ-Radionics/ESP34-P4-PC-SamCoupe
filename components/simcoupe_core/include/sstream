@@ -1,0 +1,11 @@
+// ESP32 stub: <sstream> — blocks the real sstream to prevent locale machinery
+// from being pulled into the link via ios.o → locale_init.o.
+//
+// All uses of std::stringstream / std::istringstream in SimCoupe Base/ have
+// been replaced with std::string + fmt::format / C string ops in our local
+// copies. This header exists only to satisfy transitive #include <sstream>.
+//
+// If you see a compile error about missing stringstream/istringstream, the
+// file using it needs to be copied to Base/ and patched.
+#pragma once
+// Intentionally empty — do NOT include the real <sstream>.

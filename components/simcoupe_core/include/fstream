@@ -1,0 +1,12 @@
+// ESP32 stub: <fstream> — blocks the real fstream to prevent locale machinery
+// from being pulled into the link via fstream-inst.o → ios.o → locale_init.o.
+//
+// All uses of std::ifstream / std::ofstream in SimCoupe Base/ have been
+// replaced with fopen/fclose/fgets/fprintf in our local copies.
+// This header exists only to satisfy any transitive #include <fstream> that
+// may appear in headers we cannot modify (e.g. third-party libs).
+//
+// If you see a compile error about missing ifstream/ofstream, the file using
+// it needs to be copied to Base/ and patched to use C stdio instead.
+#pragma once
+// Intentionally empty — do NOT include the real <fstream>.

@@ -1,0 +1,13 @@
+menu "SimCoupe SD Card (SDMMC)"
+
+config SIM_SDCARD_ENABLED
+    bool "Enable SDMMC SD card driver"
+    default n
+    help
+        Enable the SDMMC SD card driver for SimCoupe.
+        Mounts the SD card at /sdcard using 4-bit SDMMC bus (Slot 0).
+        GPIO pins are hard-coded for Olimex ESP32-P4-PC:
+          CLK=43, CMD=44, D0=39, D1=40, D2=41, D3=42.
+        LDO_VO4 is enabled automatically to power the SDMMC IO pins.
+
+endmenu

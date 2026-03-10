@@ -1,0 +1,18 @@
+# simcoupe.lf — Linker fragment for SimCoupe ESP32-P4
+#
+# Only map our own library. System libraries have their own .lf files
+# and conflict if we try to remap them.
+#
+# Large allocations (pMemory, contention tables, aTrace, m_FreqTable)
+# are done via heap_caps_malloc(MALLOC_CAP_SPIRAM) at runtime.
+
+[scheme:sc_extram_bss_full]
+entries:
+    bss -> extern_ram
+    common -> extern_ram
+    legacy_bss -> extern_ram
+
+[mapping:simcoupe_core]
+archive: libsimcoupe_core.a
+entries:
+    * (sc_extram_bss_full)

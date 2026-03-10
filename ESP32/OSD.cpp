@@ -1,0 +1,93 @@
+// Part of SimCoupe - A SAM Coupe emulator
+//
+// OSD.cpp: ESP32-P4 "OS-dependent" functions
+//
+// On ESP32 + FreeRTOS there is no SDL, no desktop OS, no clipboard.
+// Files live on the SD card mounted at /sdcard.
+
+#include "SimCoupe.h"
+#include "OSD.h"
+#include "Options.h"
+
+#include "esp_log.h"
+
+static const char* TAG = "osd";
+
+bool OSD::Init()
+{
+    // Nothing to do — hardware init is handled by app_main before Main::Init()
+    return true;
+}
+
+void OSD::Exit()
+{
+    // Nothing to do
+}
+
+std::string OSD::MakeFilePath(PathType type, const std::string& filename)
+{
+    std::string base;
+
+    switch (type)
+    {
+    case PathType::Settings:
+        base = "/sdcard/simcoupe";
+        break;
+
+    case PathType::Input:
+        if (!GetOption(inpath).empty())
+            base = GetOption(inpath);
+        else
+            base = "/sdcard/simcoupe/disks";
+        break;
+
+    case PathType::Output:
+        if (!GetOption(outpath).empty())
+            base = GetOption(outpath);
+        else
+            base = "/sdcard/simcoupe/output";
+        break;
+
+    case PathType::Resource:
+        base = "/sdcard/simcoupe";
+        break;
+
+    default:
+        base = "/sdcard/simcoupe";
+        break;
+    }
+
+    // Ensure directory exists
+    if (!fs::exists(base))
+    {
+        std::error_code ec;
+        fs::create_directories(base, ec);
+    }
+
+    if (filename.empty())
+        return base;
+
+    return (fs::path(base) / filename).string();
+}
+
+bool OSD::IsHidden(const std::string& path)
+{
+    auto p = fs::path(path);
+    return p.has_filename() && p.filename().string().front() == '.';
+}
+
+std::string OSD::GetClipboardText()
+{
+    // No clipboard on ESP32
+    return {};
+}
+
+void OSD::SetClipboardText(const std::string& /*str*/)
+{
+    // No clipboard on ESP32
+}
+
+void OSD::DebugTrace(const std::string& str)
+{
+    ESP_LOGD(TAG, "%s", str.c_str());
+}
