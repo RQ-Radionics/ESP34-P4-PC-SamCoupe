@@ -34,6 +34,9 @@
 #include "CPU.h"
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
 static const char* TAG_PERF = "z80perf";
 
 #include "BlueAlpha.h"
@@ -47,8 +50,68 @@ static const char* TAG_PERF = "z80perf";
 #include "Memory.h"
 #include "Mouse.h"
 #include "Options.h"
+#include "Sound.h"
 #include "Tape.h"
 #include "UI.h"
+
+// ── Core 0 sound task ────────────────────────────────────────────────────────
+// Sound::FrameUpdate() (dominated by SAASound synthesis, ~75ms at 44100Hz,
+// ~37ms at 22050Hz) runs on Core 0 while the Z80 runs on Core 1.
+//
+// Pipeline per frame N:
+//   Core 1: ExecuteChunk(N) → Frame::End(N) → IO::FrameUpdate(N) →
+//           [give s_sound_start] → ExecuteChunk(N+1) ...
+//   Core 0: [take s_sound_start] → Sound::FrameUpdate(N) → [give s_sound_done]
+//
+// Core 1 takes s_sound_done at the TOP of the next frame loop iteration,
+// BEFORE ExecuteChunk(N+1) starts writing SAA registers.  This ensures
+// SAADevice::Update() on Core 0 never races with SAADevice::Out() on Core 1.
+//
+// In turbo mode, sound synthesis is skipped (same as the old TurboMode check).
+
+static SemaphoreHandle_t s_sound_start = nullptr;
+static SemaphoreHandle_t s_sound_done  = nullptr;
+static volatile bool     s_sound_turbo = false;  // set by Core 1, read by Core 0
+
+static void sound_task(void* /*arg*/)
+{
+    for (;;) {
+        // Wait for Core 1 to signal that a frame's Z80 execution is complete
+        xSemaphoreTake(s_sound_start, portMAX_DELAY);
+
+        if (!s_sound_turbo) {
+            Sound::FrameUpdate();
+        }
+
+        // Signal Core 1 that synthesis is done (SAA registers are safe to write)
+        xSemaphoreGive(s_sound_done);
+    }
+}
+
+static void sound_task_init()
+{
+    s_sound_start = xSemaphoreCreateBinary();
+    s_sound_done  = xSemaphoreCreateBinary();
+    configASSERT(s_sound_start);
+    configASSERT(s_sound_done);
+
+    // Pre-give s_sound_done so the very first frame doesn't stall waiting
+    // for a "previous frame" that never existed.
+    xSemaphoreGive(s_sound_done);
+
+    // Pin to Core 0, priority 14 (just below simcoupe_task prio 15 on Core 1).
+    // Core 0 is otherwise idle during Z80 execution, so this task gets the
+    // full Core 0 bandwidth as soon as Core 1 signals it.
+    xTaskCreatePinnedToCore(
+        sound_task,
+        "sound_task",
+        4096,           // 4KB stack — Sound::FrameUpdate() is not deep
+        nullptr,
+        14,             // priority 14
+        nullptr,
+        0               // Core 0
+    );
+}
 
 sam_cpu cpu;
 
@@ -187,12 +250,26 @@ void Run()
 {
     // ── Loop timing diagnostic — logs breakdown for first 5 complete frames ──
     static int s_run_frames = 0;
-    static int64_t s_t_execute, s_t_frameend, s_t_flyback, s_t_checkevents;
+
+    // Initialise the Core 0 sound task (idempotent — only runs once)
+    static bool s_sound_init_done = false;
+    if (!s_sound_init_done) {
+        sound_task_init();
+        s_sound_init_done = true;
+    }
 
     while (UI::CheckEvents())
     {
         if (g_fPaused)
             continue;
+
+        // Wait for Core 0 to finish the PREVIOUS frame's Sound::FrameUpdate()
+        // before we let the Z80 write SAA registers for the current frame.
+        // On the very first iteration s_sound_done is pre-given, so no stall.
+        // NOTE: must be AFTER the g_fPaused check so we don't consume the
+        // semaphore and then loop back without giving s_sound_start.
+        if (s_sound_done)
+            xSemaphoreTake(s_sound_done, portMAX_DELAY);
 
         int64_t t0 = esp_timer_get_time();
         if (!Debug::IsActive() && !GUI::IsModal())
@@ -207,12 +284,20 @@ void Run()
         {
             EventFrameEnd(CPU_CYCLES_PER_FRAME);
             t2b = esp_timer_get_time();
-            IO::FrameUpdate();
+            IO::FrameUpdate();   // no longer calls Sound::FrameUpdate()
             t2c = esp_timer_get_time();
             Debug::FrameEnd();
             Frame::Flyback();
             t2d = esp_timer_get_time();
             CPU::frame_cycles %= CPU_CYCLES_PER_FRAME;
+
+            // Signal Core 0 to synthesise audio for this frame.
+            // Core 0 will call Sound::FrameUpdate() while Core 1 runs the
+            // next frame's ExecuteChunk() — the two overlap in time.
+            if (s_sound_start) {
+                s_sound_turbo = Frame::TurboMode();
+                xSemaphoreGive(s_sound_start);
+            }
         }
         int64_t t3 = esp_timer_get_time();
 

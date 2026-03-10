@@ -833,8 +833,9 @@ void FrameUpdate()
 
     Input::Update();
 
-    if (!Frame::TurboMode())
-        Sound::FrameUpdate();
+    // Sound::FrameUpdate() is now called from CPU::Run() via a dedicated
+    // Core 0 task, overlapped with the next frame's Z80 execution on Core 1.
+    // Do NOT call it here — it would run on Core 1 and block the Z80.
 }
 
 void UpdateInput()
