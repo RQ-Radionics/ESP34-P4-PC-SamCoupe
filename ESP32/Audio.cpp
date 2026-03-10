@@ -20,6 +20,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 static const char* TAG = "audio";
 
@@ -102,6 +103,20 @@ float Audio::AddData(uint8_t* pData_, int len_bytes)
     // backpressure of the DMA running at exactly 44100 Hz regulates timing.
     // portMAX_DELAY avoids the 20ms timeout that was causing partial writes
     // and incorrect fill ratios.
+    {
+        static int s_diag = 0;
+        if (s_diag < 10) {
+            int64_t t0 = esp_timer_get_time();
+            int written_diag = sim_audio_write(
+                reinterpret_cast<const int16_t*>(pData_), num_samples, portMAX_DELAY);
+            int64_t dt = esp_timer_get_time() - t0;
+            ESP_LOGI(TAG, "audio write %d: blocked %lld us, wrote %d/%d samples",
+                     s_diag, dt, written_diag, num_samples);
+            s_diag++;
+            if (written_diag < 0) return 0.0f;
+            return 0.5f;
+        }
+    }
     int written = sim_audio_write(
         reinterpret_cast<const int16_t*>(pData_),
         num_samples,

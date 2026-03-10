@@ -43,6 +43,27 @@ bool UI::CheckEvents()
     if (GUI::IsActive())
         Input::Update();
 
+    // ── Frame timing diagnostics (first 10 frames only) ──────────────────────
+    // Measures wall-clock time between consecutive CheckEvents() calls.
+    // This is the total frame time including Z80 execution, video render,
+    // audio write, and any blocking. Logged once at startup then disabled.
+    {
+        static int64_t s_diag_prev_us = 0;
+        static int     s_diag_count   = 0;
+        if (s_diag_count < 10)
+        {
+            int64_t now_us = esp_timer_get_time();
+            if (s_diag_prev_us != 0)
+            {
+                int64_t frame_us = now_us - s_diag_prev_us;
+                ESP_LOGI(TAG, "frame %d: %lld us (%.1f ms)",
+                         s_diag_count, frame_us, frame_us / 1000.0f);
+            }
+            s_diag_prev_us = now_us;
+            s_diag_count++;
+        }
+    }
+
     // Log emulation speed every 30 seconds.
     // ACTUAL_FRAMES_PER_SECOND = 50 (PAL SAM Coupé).
     // We count frames here and compute % speed independently of Frame.cpp's
