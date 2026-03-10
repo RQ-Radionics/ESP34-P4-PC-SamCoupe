@@ -205,6 +205,15 @@ static TaskHandle_t           s_client_task     = NULL;
 static bool                   s_running         = false;
 static kbd_dev_t               s_dev            = { 0 };
 
+/* Notification bit used to wake usb_client_task for transfer resubmission.
+ * intr_xfer_cb must NOT call usb_host_transfer_submit() directly — doing so
+ * from within usb_host_client_handle_events() causes ESP_ERR_INVALID_STATE
+ * and undefined USB host stack behaviour.  Instead the callback sets this
+ * flag and notifies the client task, which resubmits after the event loop
+ * returns control. */
+#define NOTIFY_RESUBMIT  (1UL << 0)
+static volatile bool s_resubmit_pending = false;
+
 /* Previous HID report state for diff-based make/break detection */
 static uint8_t s_prev_mod     = 0;
 
@@ -348,9 +357,21 @@ static void intr_xfer_cb(usb_transfer_t *xfer)
         ESP_LOGW(TAG, "Interrupt xfer status %d", xfer->status);
     }
 
-    /* Resubmit for next report */
+    /* Signal usb_client_task to resubmit the transfer.
+     *
+     * usb_host_transfer_submit() MUST NOT be called from within a transfer
+     * callback (i.e. from inside usb_host_client_handle_events()).  Doing so
+     * returns ESP_ERR_INVALID_STATE and can stall the USB host stack.
+     * Instead, set a flag and wake the client task via TaskNotify; the task
+     * loop resubmits after usb_host_client_handle_events() returns. */
     if (s_dev.active) {
-        usb_host_transfer_submit(xfer);
+        s_resubmit_pending = true;
+        if (s_client_task) {
+            BaseType_t higher_prio_woken = pdFALSE;
+            xTaskNotifyFromISR(s_client_task, NOTIFY_RESUBMIT, eSetBits,
+                               &higher_prio_woken);
+            portYIELD_FROM_ISR(higher_prio_woken);
+        }
     }
 }
 
@@ -617,7 +638,23 @@ static void usb_client_task(void *arg)
     xTaskNotifyGive((TaskHandle_t)arg);
 
     while (s_running) {
-        usb_host_client_handle_events(s_client_hdl, pdMS_TO_TICKS(100));
+        /* Wait for either a USB host event or a resubmit notification.
+         * xTaskNotifyWait clears NOTIFY_RESUBMIT on entry so we don't miss
+         * a notification that arrives while we are inside handle_events. */
+        uint32_t notif = 0;
+        xTaskNotifyWait(0, NOTIFY_RESUBMIT, &notif, pdMS_TO_TICKS(100));
+
+        usb_host_client_handle_events(s_client_hdl, 0);
+
+        /* Resubmit interrupt transfer if the callback requested it.
+         * This is safe here because we are outside usb_host_client_handle_events(). */
+        if (s_resubmit_pending && s_dev.active && s_dev.xfer) {
+            s_resubmit_pending = false;
+            esp_err_t err = usb_host_transfer_submit(s_dev.xfer);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "Resubmit failed: %s", esp_err_to_name(err));
+            }
+        }
     }
 
     kbd_device_close();
