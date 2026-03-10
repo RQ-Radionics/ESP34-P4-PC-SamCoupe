@@ -54,6 +54,12 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 # sys_evt task needs extra room with PSRAM/logging overhead
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
 
+# ── Compiler optimisation ─────────────────────────────────────────────────
+# Use -O2 globally (performance mode). The default DEBUG mode uses -Og which
+# is far too slow for Z80 emulation. simcoupe_core also sets -O2 explicitly
+# in its CMakeLists.txt to ensure it is never accidentally compiled at -Og.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
 # ── Logging ────────────────────────────────────────────────────────────────
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_DEFAULT_LEVEL=3
