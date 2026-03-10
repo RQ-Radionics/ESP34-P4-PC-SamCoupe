@@ -191,6 +191,12 @@ idf_component_register(
 # ── C++17 required by SimCoupe ────────────────────────────────────────────────
 target_compile_options(${COMPONENT_LIB} PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17>
+    # Override global -Og (CONFIG_COMPILER_OPTIMIZATION_DEBUG) with -O2.
+    # The Z80 emulation core is the performance bottleneck — at -Og it runs
+    # at ~25% speed; -O2 enables inlining, loop optimisation and instruction
+    # scheduling that are critical for the hot Z80 execute loop.
+    # IDF drivers remain at -Og; only simcoupe_core gets -O2.
+    -O2
     # Enable exceptions: required for ghc::filesystem (GHC_WITH_EXCEPTIONS)
     # and SimCoupe's try/catch blocks. The resulting unwind-dw2.o .sdata
     # section is handled by a targeted ldgen mapping in main/simcoupe.lf.
@@ -202,6 +208,9 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
     # Suppress warnings from vendored code (applies to both C and C++)
     -Wno-error
     -Wno-error=enum-int-mismatch
+    # -O2 enables -Warray-bounds which fires a false positive in Keyboard.cpp
+    # (IsPressed() inlined into Update() — index is always valid at runtime).
+    -Wno-array-bounds
     -Wno-unused-variable
     -Wno-unused-function
     -Wno-sign-compare
