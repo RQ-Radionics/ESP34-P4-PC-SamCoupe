@@ -263,14 +263,6 @@ void Run()
         if (g_fPaused)
             continue;
 
-        // Wait for Core 0 to finish the PREVIOUS frame's Sound::FrameUpdate()
-        // before we let the Z80 write SAA registers for the current frame.
-        // On the very first iteration s_sound_done is pre-given, so no stall.
-        // NOTE: must be AFTER the g_fPaused check so we don't consume the
-        // semaphore and then loop back without giving s_sound_start.
-        if (s_sound_done)
-            xSemaphoreTake(s_sound_done, portMAX_DELAY);
-
         int64_t t0 = esp_timer_get_time();
         if (!Debug::IsActive() && !GUI::IsModal())
             ExecuteChunk();
@@ -291,10 +283,13 @@ void Run()
             t2d = esp_timer_get_time();
             CPU::frame_cycles %= CPU_CYCLES_PER_FRAME;
 
-            // Signal Core 0 to synthesise audio for this frame.
-            // Core 0 will call Sound::FrameUpdate() while Core 1 runs the
-            // next frame's ExecuteChunk() — the two overlap in time.
+            // Wait for Core 0 to finish the PREVIOUS frame's Sound::FrameUpdate()
+            // before signalling it to start the next one.  This ensures SAA
+            // register writes in the next ExecuteChunk() don't race with
+            // SAADevice::Update() still running on Core 0.
+            // On the very first frame s_sound_done is pre-given, so no stall.
             if (s_sound_start) {
+                xSemaphoreTake(s_sound_done, portMAX_DELAY);
                 s_sound_turbo = Frame::TurboMode();
                 xSemaphoreGive(s_sound_start);
             }
