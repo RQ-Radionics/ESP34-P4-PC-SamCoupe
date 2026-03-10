@@ -54,7 +54,7 @@ public:
     Rect DisplayRect() const override;
     void ResizeWindow(int height) const override { /* fixed display */ }
     std::pair<int, int> MouseRelative() override { return {0, 0}; }
-    void OptionsChanged() override { BuildPalette(); memset(m_prev, 0xFF, sizeof(m_prev)); }
+    void OptionsChanged() override { BuildPalette(); }
     void Update(const FrameBuffer& fb) override;
 
 private:
@@ -67,12 +67,6 @@ private:
     // DRAM row buffer: palette expand writes here, then 2×memcpy to PSRAM.
     // Only SAM_W pixels wide (512×3 = 1536 bytes) — copied at offset OFF_X*3.
     alignas(4) uint8_t m_row_buf[SAM_W * 3];   // one expanded SAM row (1536 bytes)
-
-    // Previous frame snapshot for dirty line detection.
-    // 512×192 = 98,304 bytes in DRAM. Compared with current frame per-row
-    // (memcmp 512 bytes) before deciding whether to blit that row.
-    // Initialised to 0xFF so all rows are dirty on the first frame.
-    alignas(4) uint8_t m_prev[SAM_W * SAM_H];
 
     bool m_initialized = false;
 };
@@ -170,8 +164,6 @@ bool ESP32Video::Init()
     }
 
     BuildPalette();
-    // Mark all rows dirty for the first frame
-    memset(m_prev, 0xFF, sizeof(m_prev));
     m_initialized = true;
     ESP_LOGI(TAG, "ESP32Video: %dx%d display, SAM %dx%d -> 1xH 2xV -> pad L/R %dpx T/B %dpx (dirty-track)",
              DST_W, DST_H, SAM_W, SAM_H, OFF_X, OFF_Y);
@@ -212,6 +204,8 @@ void ESP32Video::Update(const FrameBuffer& fb)
     if (!dst)
         return;
 
+
+
     const int src_w = fb.Width();   // 512 (normal) or 512 (GUI)
     const int src_h = fb.Height();  // 192 (normal) or 384 (GUI)
 
@@ -243,30 +237,12 @@ void ESP32Video::Update(const FrameBuffer& fb)
     {
         // Normal framebuffer: 1 source row → 2 consecutive display rows.
         //
-        // With DST_W=512=SAM_W, DST_STRIDE=1536 = exactly one expanded row.
-        // dy0 and dy1 are contiguous in PSRAM (no horizontal padding gap).
-        // We expand to a 1536-byte DRAM row_buf, then copy to both PSRAM rows.
-        // Two separate memcpy(1536) calls are used — benchmarking showed this
-        // is faster than duplicating row_buf and doing one memcpy(3072).
-
-        // Dirty line tracking: compare each row with previous frame.
-        // Only blit rows that changed. Track first/last dirty row for
-        // a minimal flush region.
-        int first_dirty = -1;
-        int last_dirty  = -1;
-        int dirty_count = 0;
-
+        // Paint all 192 SAM rows every frame — no dirty tracking.
+        // With double buffering the back buffer is the old front, so we must
+        // always write all rows to keep both buffers consistent.
         for (int sy = 0; sy < src_h; ++sy)
         {
             const uint8_t* src_line = fb.GetLine(sy);
-            uint8_t* prev_line = m_prev + sy * src_w;
-
-            // Compare with previous frame (DRAM→DRAM, 512 bytes)
-            if (memcmp(src_line, prev_line, src_w) == 0)
-                continue;  // row unchanged — skip expand and PSRAM write
-
-            // Row changed: update prev, expand, blit
-            memcpy(prev_line, src_line, src_w);
 
             if (vdiag) s_expand_us -= esp_timer_get_time();
             uint8_t* p = m_row_buf;
@@ -279,30 +255,19 @@ void ESP32Video::Update(const FrameBuffer& fb)
 
             if (vdiag) s_copy_us -= esp_timer_get_time();
             int dy0 = OFF_Y + sy * 2;
-            const size_t row_bytes = SAM_W * 3;  // 1536 bytes
+            const size_t row_bytes = SAM_W * 3;
             memcpy(dst + dy0       * DST_STRIDE + OFF_X * 3, m_row_buf, row_bytes);
             memcpy(dst + (dy0 + 1) * DST_STRIDE + OFF_X * 3, m_row_buf, row_bytes);
             if (vdiag) s_copy_us += esp_timer_get_time();
-
-            if (first_dirty < 0) first_dirty = sy;
-            last_dirty = sy;
-            dirty_count++;
         }
 
-        // Flush only the span of dirty rows (in display coordinates).
-        // If nothing changed, skip the flush entirely.
         if (vdiag) vt1 = esp_timer_get_time();
-        if (first_dirty >= 0)
-        {
-            int disp_first = OFF_Y + first_dirty * 2;
-            int disp_last  = OFF_Y + last_dirty  * 2 + 2;  // exclusive
-            sim_display_flush_region((size_t)disp_first * DST_STRIDE,
-                                     (size_t)(disp_last - disp_first) * DST_STRIDE);
-        }
+        sim_display_flush_region((size_t)OFF_Y * DST_STRIDE,
+                                 (size_t)(SCALED_H) * DST_STRIDE);
         if (vdiag) {
             vt2 = esp_timer_get_time();
-            ESP_LOGI(TAG, "video frame %d: dirty=%d/%d  expand=%lld us  copy2psram=%lld us  flush=%lld us  total=%lld us",
-                     s_vdiag_count, dirty_count, src_h,
+            ESP_LOGI(TAG, "video frame %d: expand=%lld us  copy2psram=%lld us  flush=%lld us  total=%lld us",
+                     s_vdiag_count,
                      (long long)s_expand_us,
                      (long long)s_copy_us,
                      (long long)(vt2 - vt1),

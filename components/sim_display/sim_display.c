@@ -245,14 +245,18 @@ esp_err_t sim_display_flush(void)
 {
     if (!s_panel) return ESP_ERR_INVALID_STATE;
     size_t fb_size = CONFIG_SIM_DISPLAY_HACT * CONFIG_SIM_DISPLAY_VACT * 3;
-    esp_cache_msync(s_fb[0], fb_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    esp_cache_msync(s_fb[s_back_buf], fb_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    dpi_set_cur_fb(s_panel, (uint8_t)s_back_buf);
+    s_back_buf ^= 1;
     return ESP_OK;
 }
 
 esp_err_t sim_display_flush_region(size_t byte_offset, size_t byte_size)
 {
     if (!s_panel) return ESP_ERR_INVALID_STATE;
-    uint8_t *base = (uint8_t *)s_fb[0];
+    uint8_t *base = (uint8_t *)s_fb[s_back_buf];
     esp_cache_msync(base + byte_offset, byte_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    dpi_set_cur_fb(s_panel, (uint8_t)s_back_buf);
+    s_back_buf ^= 1;
     return ESP_OK;
 }
