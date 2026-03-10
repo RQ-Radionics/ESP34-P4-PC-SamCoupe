@@ -53,11 +53,11 @@ menu "SimCoupe Display (LT8912B HDMI Bridge)"
 
     config SIM_DISPLAY_DSI_LANE_MBPS
         int "DSI lane bit rate (Mbps)"
-        default 800
+        default 1000
         help
             MIPI DSI bit rate per lane in Mbps.
             Must satisfy: lane_mbps >= pclk_mhz * 24 / num_lanes (with margin).
-            1280x720@64MHz/2lanes: 64*24/2=768 Mbps → use 800 Mbps.
+            1280x720@64MHz/2lanes: 64*24/2=768 Mbps → 1000 Mbps matches production test.
 
     # ---------------------------------------------------------------
     # Video timing — single source of truth for all timing parameters.

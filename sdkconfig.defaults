@@ -141,7 +141,7 @@ CONFIG_SIM_DISPLAY_HDMI_MODE=y
 CONFIG_SIM_DISPLAY_DSI_LANES=2
 # 720p RGB888: pixel clock 64MHz × 24bpp = 1536Mbps total / 2 lanes = 768Mbps.
 # 800Mbps gives comfortable headroom.
-CONFIG_SIM_DISPLAY_DSI_LANE_MBPS=800
+CONFIG_SIM_DISPLAY_DSI_LANE_MBPS=1000
 # 1280×720 reduced-blanking timings — validated by Olimex production test.
 # pclk=64MHz from PLL_F240M (240/4=60? No — IDF picks nearest: 240/3=80? Actually
 # MIPI_DSI_DPI_CLK_SRC_DEFAULT lets the IDF pick the best PLL divisor for 64MHz).
