@@ -15,7 +15,15 @@ static const char* TAG = "osd";
 
 bool OSD::Init()
 {
-    // Nothing to do — hardware init is handled by app_main before Main::Init()
+    // Force audio sync on ESP32: let I2S DMA backpressure regulate timing.
+    // std::this_thread::sleep_until (used by Sound.cpp when audiosync=false)
+    // relies on high_resolution_clock which maps to system_clock on this
+    // toolchain (is_steady=false). With an unset RTC (epoch=0), sleep_until
+    // behaves incorrectly and stalls the emulation loop, causing ~14% speed.
+    // With audiosync=true, Sound.cpp skips sleep_until entirely and timing
+    // is driven by i2s_channel_write blocking at 44100 Hz.
+    SetOption(audiosync, true);
+
     return true;
 }
 

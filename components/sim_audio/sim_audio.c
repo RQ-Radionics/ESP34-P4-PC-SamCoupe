@@ -56,10 +56,17 @@ static bool               s_initialized = false;
 /* ------------------------------------------------------------------ */
 static esp_err_t audio_i2s_init(void)
 {
-    /* TX-only: pass NULL for rx — no I2S RX hardware needed */
+    /* TX-only: pass NULL for rx — no I2S RX hardware needed.
+     * DMA buffer: 4 descriptors × 882 frames = 3528 frames = ~80ms at 44100Hz.
+     * SimCoupe generates 882 stereo frames per emulation frame (44100/50).
+     * With audiosync=true, i2s_channel_write blocks when the ring is full,
+     * acting as the master clock.  The buffer must hold at least 2 frames
+     * (1764 frames) to absorb jitter; 4 frames gives comfortable headroom. */
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(
         CONFIG_SIM_AUDIO_I2S_NUM, I2S_ROLE_MASTER);
-    chan_cfg.auto_clear = true;
+    chan_cfg.auto_clear    = true;
+    chan_cfg.dma_desc_num  = 4;    /* 4 DMA descriptors */
+    chan_cfg.dma_frame_num = 882;  /* one SAM frame per DMA descriptor */
     ESP_RETURN_ON_ERROR(
         i2s_new_channel(&chan_cfg, &s_i2s_tx, NULL),
         TAG, "i2s_new_channel");

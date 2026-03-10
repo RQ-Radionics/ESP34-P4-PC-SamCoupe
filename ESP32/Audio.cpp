@@ -18,6 +18,7 @@
 #include "sim_audio.h"
 #include "sim_display.h"
 
+#include "freertos/FreeRTOS.h"
 #include "esp_log.h"
 
 static const char* TAG = "audio";
@@ -95,16 +96,21 @@ float Audio::AddData(uint8_t* pData_, int len_bytes)
         return 0.0f;
 
     int num_samples = len_bytes / sizeof(int16_t);
+
+    // Block until the I2S DMA ring has room for all samples.
+    // This makes I2S the master clock for the emulation loop — the natural
+    // backpressure of the DMA running at exactly 44100 Hz regulates timing.
+    // portMAX_DELAY avoids the 20ms timeout that was causing partial writes
+    // and incorrect fill ratios.
     int written = sim_audio_write(
         reinterpret_cast<const int16_t*>(pData_),
         num_samples,
-        /*timeout_ms=*/20);   // ~1 frame at 50 Hz
+        portMAX_DELAY);
 
     if (written < 0)
         return 0.0f;
 
-    // Return approximate fill ratio based on how much was accepted
-    // (sim_audio_write blocks until the DMA ring has room, so this is
-    //  mostly informational — SimCoupe uses it for speed throttling)
-    return static_cast<float>(written) / static_cast<float>(num_samples);
+    // Return 0.5 (half full) so Sound.cpp's speed-adjust scale stays at 1.0
+    // and does NOT call sleep_until — timing is already handled by I2S above.
+    return 0.5f;
 }
