@@ -9,8 +9,13 @@
 //
 // With DST_W=512 = SAM_W, there is NO horizontal padding.
 // DST_STRIDE = 512×3 = 1536 bytes = exactly one expanded SAM row.
-// Two vertically-doubled rows (dy0, dy1) are contiguous in the framebuffer,
-// so a single memcpy of 3072 bytes replaces two separate 1536-byte copies.
+// Two vertically-doubled rows (dy0, dy1) are contiguous in the framebuffer.
+//
+// Dirty line tracking: each SAM row is compared with the previous frame.
+// Only changed rows are expanded and written to PSRAM. The flush region
+// covers only the span [first_dirty .. last_dirty] (inclusive).
+// On static screens this eliminates most PSRAM writes; worst case (full
+// motion) adds only 192 × memcmp(512) = ~98KB of DRAM comparison overhead.
 //
 // pGuiScreen (OSD): 512×384 — rendered 1:1 starting at row 48.
 //
@@ -50,7 +55,7 @@ public:
     Rect DisplayRect() const override;
     void ResizeWindow(int height) const override { /* fixed display */ }
     std::pair<int, int> MouseRelative() override { return {0, 0}; }
-    void OptionsChanged() override { BuildPalette(); }
+    void OptionsChanged() override { BuildPalette(); memset(m_prev, 0xFF, sizeof(m_prev)); }
     void Update(const FrameBuffer& fb) override;
 
 private:
@@ -61,10 +66,13 @@ private:
     PaletteEntry m_palette[128]{};
 
     // DRAM row buffer: palette expand writes here, then 2×memcpy to PSRAM.
-    // With DST_W=512=SAM_W, dy0 and dy1 are contiguous in PSRAM, but we still
-    // use two separate memcpy(1536) calls — one per row — which is faster than
-    // duplicating into a 3072-byte buffer and doing one memcpy(3072).
     alignas(4) uint8_t m_row_buf[DST_STRIDE];  // one expanded row (1536 bytes)
+
+    // Previous frame snapshot for dirty line detection.
+    // 512×192 = 98,304 bytes in DRAM. Compared with current frame per-row
+    // (memcmp 512 bytes) before deciding whether to blit that row.
+    // Initialised to 0xFF so all rows are dirty on the first frame.
+    alignas(4) uint8_t m_prev[SAM_W * SAM_H];
 
     bool m_initialized = false;
 };
@@ -160,8 +168,10 @@ bool ESP32Video::Init()
     esp_cache_msync(fb1, fb_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 
     BuildPalette();
+    // Mark all rows dirty for the first frame
+    memset(m_prev, 0xFF, sizeof(m_prev));
     m_initialized = true;
-    ESP_LOGI(TAG, "ESP32Video: %dx%d display, SAM %dx%d -> 1xH 2xV -> pad top/bot %dpx",
+    ESP_LOGI(TAG, "ESP32Video: %dx%d display, SAM %dx%d -> 1xH 2xV -> pad top/bot %dpx (dirty-track)",
              DST_W, DST_H, SAM_W, SAM_H, OFF_Y);
     return true;
 }
@@ -236,11 +246,25 @@ void ESP32Video::Update(const FrameBuffer& fb)
         // Two separate memcpy(1536) calls are used — benchmarking showed this
         // is faster than duplicating row_buf and doing one memcpy(3072).
 
+        // Dirty line tracking: compare each row with previous frame.
+        // Only blit rows that changed. Track first/last dirty row for
+        // a minimal flush region.
+        int first_dirty = -1;
+        int last_dirty  = -1;
+        int dirty_count = 0;
+
         for (int sy = 0; sy < src_h; ++sy)
         {
             const uint8_t* src_line = fb.GetLine(sy);
+            uint8_t* prev_line = m_prev + sy * src_w;
 
-            // Expand one SAM row into DRAM row_buf
+            // Compare with previous frame (DRAM→DRAM, 512 bytes)
+            if (memcmp(src_line, prev_line, src_w) == 0)
+                continue;  // row unchanged — skip expand and PSRAM write
+
+            // Row changed: update prev, expand, blit
+            memcpy(prev_line, src_line, src_w);
+
             if (vdiag) s_expand_us -= esp_timer_get_time();
             uint8_t* p = m_row_buf;
             for (int sx = 0; sx < src_w; ++sx)
@@ -250,26 +274,33 @@ void ESP32Video::Update(const FrameBuffer& fb)
             }
             if (vdiag) s_expand_us += esp_timer_get_time();
 
-            // Copy to both consecutive PSRAM rows (dy0 and dy1 = dy0+1).
-            // With DST_W=512=SAM_W, dy0 and dy1 are contiguous in PSRAM
-            // (no horizontal padding), but two separate memcpy(1536) calls
-            // are faster than duplicating row_buf and doing one memcpy(3072).
             if (vdiag) s_copy_us -= esp_timer_get_time();
             int dy0 = OFF_Y + sy * 2;
-            memcpy(dst + dy0 * DST_STRIDE,         m_row_buf, DST_STRIDE);
-            memcpy(dst + (dy0 + 1) * DST_STRIDE,   m_row_buf, DST_STRIDE);
+            memcpy(dst + dy0 * DST_STRIDE,       m_row_buf, DST_STRIDE);
+            memcpy(dst + (dy0+1) * DST_STRIDE,   m_row_buf, DST_STRIDE);
             if (vdiag) s_copy_us += esp_timer_get_time();
+
+            if (first_dirty < 0) first_dirty = sy;
+            last_dirty = sy;
+            dirty_count++;
         }
 
-        // Flush active area: rows [OFF_Y .. OFF_Y+SCALED_H) = [48..432)
-        // = 384 rows × 1536 bytes = 589,824 bytes
+        // Flush only the span of dirty rows (in display coordinates).
+        // If nothing changed, skip the flush entirely.
         if (vdiag) vt1 = esp_timer_get_time();
-        sim_display_flush_region((size_t)OFF_Y * DST_STRIDE,
-                                 (size_t)SCALED_H * DST_STRIDE);
+        if (first_dirty >= 0)
+        {
+            // Display rows: dy0(first_dirty) .. dy1(last_dirty)+1
+            // = [OFF_Y + first_dirty*2 .. OFF_Y + last_dirty*2 + 2)
+            int disp_first = OFF_Y + first_dirty * 2;
+            int disp_last  = OFF_Y + last_dirty  * 2 + 2;  // exclusive
+            sim_display_flush_region((size_t)disp_first * DST_STRIDE,
+                                     (size_t)(disp_last - disp_first) * DST_STRIDE);
+        }
         if (vdiag) {
             vt2 = esp_timer_get_time();
-            ESP_LOGI(TAG, "video frame %d: expand=%lld us  copy2psram=%lld us  flush=%lld us  total=%lld us",
-                     s_vdiag_count,
+            ESP_LOGI(TAG, "video frame %d: dirty=%d/%d  expand=%lld us  copy2psram=%lld us  flush=%lld us  total=%lld us",
+                     s_vdiag_count, dirty_count, src_h,
                      (long long)s_expand_us,
                      (long long)s_copy_us,
                      (long long)(vt2 - vt1),
