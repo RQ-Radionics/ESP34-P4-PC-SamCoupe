@@ -53,10 +53,9 @@ public:
 private:
     void BuildPalette();
 
-    // RGB888 palette: 128 entries × 3 bytes (R, G, B)
-    uint8_t m_palette_r[128]{};
-    uint8_t m_palette_g[128]{};
-    uint8_t m_palette_b[128]{};
+    // RGB888 palette: 128 entries as packed structs for sequential access
+    struct PaletteEntry { uint8_t r, g, b; };
+    PaletteEntry m_palette[128]{};
 
     bool m_initialized = false;
 };
@@ -144,6 +143,15 @@ bool ESP32Video::Init()
         return false;
     }
 
+    // Zero both framebuffers once — padding rows stay black forever.
+    // Update() will only write the active area, never touching padding again.
+    size_t fb_size = DST_W * DST_H * 3;
+    memset(fb0, 0, fb_size);
+    memset(fb1, 0, fb_size);
+    // Flush both to PSRAM so DMA sees black before first frame
+    esp_cache_msync(fb0, fb_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    esp_cache_msync(fb1, fb_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+
     BuildPalette();
     m_initialized = true;
     ESP_LOGI(TAG, "ESP32Video: %dx%d display, SAM %dx192 -> 1xH 2xV -> centred (pad %dx%d)",
@@ -161,9 +169,9 @@ void ESP32Video::BuildPalette()
     auto palette = IO::Palette();
     for (size_t i = 0; i < palette.size() && i < 128; ++i)
     {
-        m_palette_r[i] = palette[i].red;
-        m_palette_g[i] = palette[i].green;
-        m_palette_b[i] = palette[i].blue;
+        m_palette[i].r = palette[i].red;
+        m_palette[i].g = palette[i].green;
+        m_palette[i].b = palette[i].blue;
     }
 }
 
@@ -201,22 +209,11 @@ void ESP32Video::Update(const FrameBuffer& fb)
     const int off_y = (DST_H - scaled_h) / 2;  // 48 for 384-tall
 
     // Source column range (clip if image wider than display)
-    const int src_x_start = (off_x < 0) ? -off_x : 0;
-    const int src_x_end   = (off_x < 0) ? std::min(src_w, DST_W) : src_w;
-    const int dst_x_start = std::max(off_x, 0);
-    const int dst_x_bytes = dst_x_start * 3;
-    const int render_w    = src_x_end - src_x_start;
+    const int src_x_start  = (off_x < 0) ? -off_x : 0;
+    const int src_x_end    = (off_x < 0) ? std::min(src_w, DST_W) : src_w;
+    const int dst_x_bytes  = std::max(off_x, 0) * 3;
+    const int render_w     = src_x_end - src_x_start;
     const int render_bytes = render_w * 3;
-    const bool has_h_pad  = (off_x > 0);
-    const int right_pad_off = dst_x_bytes + render_bytes;
-    const int right_pad_len = DST_STRIDE - right_pad_off;
-
-    // Clear top padding rows
-    if (off_y > 0)
-    {
-        for (int dy = 0; dy < off_y && dy < DST_H; ++dy)
-            memset(dst + dy * DST_STRIDE, 0, DST_STRIDE);
-    }
 
     // Source row range
     const int src_y_start = (off_y < 0) ? (-off_y) / (is_gui ? 1 : 2) : 0;
@@ -224,71 +221,45 @@ void ESP32Video::Update(const FrameBuffer& fb)
         ? std::min(src_h, DST_H - std::max(off_y, 0))
         : std::min(src_h, (DST_H - std::max(off_y, 0) + 1) / 2);
 
+    // Padding rows (top, bottom, left, right) are zeroed once in Init() and
+    // never written again — do NOT memset them here every frame.
+
     for (int sy = src_y_start; sy < src_y_end; ++sy)
     {
         const uint8_t* src_line = fb.GetLine(sy) + src_x_start;
 
         if (is_gui)
         {
-            // GUI: 1 source row → 1 display row
+            // GUI: 1 source row → 1 display row, written directly to PSRAM.
             int dy = off_y + sy;
             if (dy < 0 || dy >= DST_H) continue;
-
-            uint8_t* dst_row = dst + dy * DST_STRIDE;
-            if (has_h_pad)
-            {
-                memset(dst_row, 0, dst_x_bytes);
-                if (right_pad_len > 0)
-                    memset(dst_row + right_pad_off, 0, right_pad_len);
-            }
-
-            uint8_t* p = dst_row + dst_x_bytes;
+            uint8_t* p = dst + dy * DST_STRIDE + dst_x_bytes;
             for (int sx = 0; sx < render_w; ++sx)
             {
-                uint8_t idx = src_line[sx] & 0x7F;
-                *p++ = m_palette_r[idx];
-                *p++ = m_palette_g[idx];
-                *p++ = m_palette_b[idx];
+                const PaletteEntry& e = m_palette[src_line[sx] & 0x7F];
+                *p++ = e.r; *p++ = e.g; *p++ = e.b;
             }
         }
         else
         {
             // Normal framebuffer: 1 source row → 2 display rows (2× vertical).
-            // Build one RGB row into a stack buffer, then memcpy to both rows.
-            // This halves palette lookups vs writing each row independently.
+            // Expand palette into a DRAM stack buffer, then memcpy ×2 to PSRAM.
+            // Sequential DRAM writes are fast; two bulk memcpy beats 2× scatter.
             uint8_t row_buf[SAM_W * 3];
             uint8_t* p = row_buf;
             for (int sx = 0; sx < render_w; ++sx)
             {
-                uint8_t idx = src_line[sx] & 0x7F;
-                *p++ = m_palette_r[idx];
-                *p++ = m_palette_g[idx];
-                *p++ = m_palette_b[idx];
+                const PaletteEntry& e = m_palette[src_line[sx] & 0x7F];
+                *p++ = e.r; *p++ = e.g; *p++ = e.b;
             }
 
             int dy0 = off_y + sy * 2;
             int dy1 = dy0 + 1;
-
-            for (int dy : {dy0, dy1})
-            {
-                if (dy < 0 || dy >= DST_H) continue;
-                uint8_t* dst_row = dst + dy * DST_STRIDE;
-                if (has_h_pad)
-                {
-                    memset(dst_row, 0, dst_x_bytes);
-                    if (right_pad_len > 0)
-                        memset(dst_row + right_pad_off, 0, right_pad_len);
-                }
-                memcpy(dst_row + dst_x_bytes, row_buf, render_bytes);
-            }
+            if (dy0 >= 0 && dy0 < DST_H)
+                memcpy(dst + dy0 * DST_STRIDE + dst_x_bytes, row_buf, render_bytes);
+            if (dy1 >= 0 && dy1 < DST_H)
+                memcpy(dst + dy1 * DST_STRIDE + dst_x_bytes, row_buf, render_bytes);
         }
-    }
-
-    // Clear bottom padding rows
-    {
-        int bottom_start = std::max(off_y + scaled_h, 0);
-        for (int dy = bottom_start; dy < DST_H; ++dy)
-            memset(dst + dy * DST_STRIDE, 0, DST_STRIDE);
     }
 
     if (vdiag) vt1 = esp_timer_get_time();
