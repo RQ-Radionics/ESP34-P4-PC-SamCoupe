@@ -19,6 +19,10 @@
 #include "Sound.h"
 
 #include "esp_system.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+
+static const char* TAG = "speed";
 
 bool g_fActive = true;
 
@@ -38,6 +42,33 @@ bool UI::CheckEvents()
     // If the GUI is active, poll input here (same as SDL port)
     if (GUI::IsActive())
         Input::Update();
+
+    // Log emulation speed every 30 seconds.
+    // ACTUAL_FRAMES_PER_SECOND = 50 (PAL SAM Coupé).
+    // We count frames here and compute % speed independently of Frame.cpp's
+    // profile_text (which is an internal variable not exposed in Frame.h).
+    static int64_t s_last_log_us = 0;
+    static int     s_frame_count = 0;
+    s_frame_count++;
+
+    int64_t now_us = esp_timer_get_time();
+    if (s_last_log_us == 0)
+    {
+        s_last_log_us = now_us;
+    }
+    else
+    {
+        int64_t elapsed_us = now_us - s_last_log_us;
+        if (elapsed_us >= 30'000'000)  // 30 seconds
+        {
+            float fps     = s_frame_count * 1'000'000.0f / elapsed_us;
+            float percent = fps / ACTUAL_FRAMES_PER_SECOND * 100.0f;
+            ESP_LOGI(TAG, "Speed: %.0f%% (%.1f fps, %d frames in %.1fs)",
+                     percent, fps, s_frame_count, elapsed_us / 1'000'000.0f);
+            s_last_log_us = now_us;
+            s_frame_count = 0;
+        }
+    }
 
     // On ESP32 there is no quit event — run forever
     return true;
