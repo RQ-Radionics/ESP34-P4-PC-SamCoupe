@@ -54,7 +54,7 @@ public:
     Rect DisplayRect() const override;
     void ResizeWindow(int height) const override { /* fixed display */ }
     std::pair<int, int> MouseRelative() override { return {0, 0}; }
-    void OptionsChanged() override { BuildPalette(); }
+    void OptionsChanged() override { BuildPalette(); memset(m_prev, 0xFF, sizeof(m_prev)); }
     void Update(const FrameBuffer& fb) override;
 
 private:
@@ -65,8 +65,12 @@ private:
     PaletteEntry m_palette[128]{};
 
     // DRAM row buffer: palette expand writes here, then 2×memcpy to PSRAM.
-    // Only SAM_W pixels wide (512×3 = 1536 bytes) — copied at offset OFF_X*3.
     alignas(4) uint8_t m_row_buf[SAM_W * 3];   // one expanded SAM row (1536 bytes)
+
+    // Previous frame snapshot for dirty detection (DRAM, 512×192 = 98304 bytes).
+    // When a row is dirty it is written to BOTH framebuffers so they stay in
+    // sync — dirty tracking is then safe with double buffering.
+    alignas(4) uint8_t m_prev[SAM_W * SAM_H];
 
     bool m_initialized = false;
 };
@@ -164,6 +168,7 @@ bool ESP32Video::Init()
     }
 
     BuildPalette();
+    memset(m_prev, 0xFF, sizeof(m_prev));
     m_initialized = true;
     ESP_LOGI(TAG, "ESP32Video: %dx%d display, SAM %dx%d -> 1xH 2xV -> pad L/R %dpx T/B %dpx (dirty-track)",
              DST_W, DST_H, SAM_W, SAM_H, OFF_X, OFF_Y);
@@ -237,12 +242,26 @@ void ESP32Video::Update(const FrameBuffer& fb)
     {
         // Normal framebuffer: 1 source row → 2 consecutive display rows.
         //
-        // Paint all 192 SAM rows every frame — no dirty tracking.
-        // With double buffering the back buffer is the old front, so we must
-        // always write all rows to keep both buffers consistent.
+        // Dirty-line tracking: only expand+blit rows that changed.
+        // Each dirty row is written to BOTH framebuffers (back and front)
+        // so both stay in sync — safe with double buffering.
+        void* fb0_ptr = nullptr;
+        void* fb1_ptr = nullptr;
+        sim_display_get_framebuffer(&fb0_ptr, &fb1_ptr);
+        uint8_t* other = (dst == (uint8_t*)fb0_ptr) ? (uint8_t*)fb1_ptr : (uint8_t*)fb0_ptr;
+
+        int first_dirty = -1;
+        int last_dirty  = -1;
+
         for (int sy = 0; sy < src_h; ++sy)
         {
             const uint8_t* src_line = fb.GetLine(sy);
+            uint8_t* prev_line = m_prev + sy * src_w;
+
+            if (memcmp(src_line, prev_line, src_w) == 0)
+                continue;
+
+            memcpy(prev_line, src_line, src_w);
 
             if (vdiag) s_expand_us -= esp_timer_get_time();
             uint8_t* p = m_row_buf;
@@ -256,14 +275,28 @@ void ESP32Video::Update(const FrameBuffer& fb)
             if (vdiag) s_copy_us -= esp_timer_get_time();
             int dy0 = OFF_Y + sy * 2;
             const size_t row_bytes = SAM_W * 3;
-            memcpy(dst + dy0       * DST_STRIDE + OFF_X * 3, m_row_buf, row_bytes);
-            memcpy(dst + (dy0 + 1) * DST_STRIDE + OFF_X * 3, m_row_buf, row_bytes);
+            // Write to back buffer
+            memcpy(dst   + dy0       * DST_STRIDE + OFF_X * 3, m_row_buf, row_bytes);
+            memcpy(dst   + (dy0 + 1) * DST_STRIDE + OFF_X * 3, m_row_buf, row_bytes);
+            // Write to front buffer too — keeps both in sync
+            if (other) {
+                memcpy(other + dy0       * DST_STRIDE + OFF_X * 3, m_row_buf, row_bytes);
+                memcpy(other + (dy0 + 1) * DST_STRIDE + OFF_X * 3, m_row_buf, row_bytes);
+            }
             if (vdiag) s_copy_us += esp_timer_get_time();
+
+            if (first_dirty < 0) first_dirty = sy;
+            last_dirty = sy;
         }
 
         if (vdiag) vt1 = esp_timer_get_time();
-        sim_display_flush_region((size_t)OFF_Y * DST_STRIDE,
-                                 (size_t)(SCALED_H) * DST_STRIDE);
+        if (first_dirty >= 0)
+        {
+            int disp_first = OFF_Y + first_dirty * 2;
+            int disp_last  = OFF_Y + last_dirty  * 2 + 2;
+            sim_display_flush_region((size_t)disp_first * DST_STRIDE,
+                                     (size_t)(disp_last - disp_first) * DST_STRIDE);
+        }
         if (vdiag) {
             vt2 = esp_timer_get_time();
             ESP_LOGI(TAG, "video frame %d: expand=%lld us  copy2psram=%lld us  flush=%lld us  total=%lld us",
