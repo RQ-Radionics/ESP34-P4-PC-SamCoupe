@@ -57,10 +57,13 @@ void *sim_display_get_back_buffer(void);
 esp_err_t sim_display_flush(void);
 
 /**
- * @brief Flush only a region of the back buffer, then swap front/back.
+ * @brief Flush only a region of the back buffer to display (no swap).
  *
- * Like sim_display_flush() but only syncs [byte_offset, byte_offset+byte_size)
- * of the back buffer.  Use this to avoid syncing unchanged padding rows.
+ * Syncs [byte_offset, byte_offset+byte_size) of the back buffer cache to
+ * PSRAM and points the DPI DMA at the back buffer — but does NOT swap
+ * front/back.  Used with dirty-line tracking, which writes incrementally
+ * to the same buffer across frames.  Swapping would produce a stale back
+ * buffer missing all previous frame content.
  *
  * @param byte_offset  Byte offset from start of back buffer to start syncing.
  * @param byte_size    Number of bytes to sync.

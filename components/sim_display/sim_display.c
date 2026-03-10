@@ -281,10 +281,13 @@ esp_err_t sim_display_flush_region(size_t byte_offset, size_t byte_size)
 {
     if (!s_panel) return ESP_ERR_INVALID_STATE;
 
+    /* NO swap: dirty-line tracking writes incrementally to the same buffer.
+     * Swapping would give us a stale back buffer missing all previous frames.
+     * We always render into s_fb[s_back_buf] (fixed) and the DPI DMA reads
+     * the other buffer.  No tearing: SAM runs at 50fps, DPI scans at 60fps. */
     uint8_t *base = (uint8_t *)s_fb[s_back_buf];
     esp_cache_msync(base + byte_offset, byte_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 
     dpi_set_cur_fb(s_panel, (uint8_t)s_back_buf);
-    s_back_buf ^= 1;
     return ESP_OK;
 }
