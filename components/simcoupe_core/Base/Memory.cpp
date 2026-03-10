@@ -84,15 +84,19 @@ bool Init(bool fFirstInit_/*=false*/)
                 esp_system_abort("Memory::Init: failed to allocate SAM RAM in PSRAM");
         }
 
-        // Allocate contention tables in PSRAM (~120KB each, 360KB total)
+        // Allocate contention tables in internal DRAM (NOT PSRAM).
+        // contention_ptr[] is accessed on every Z80 clock cycle (~120K/frame).
+        // PSRAM latency (~100ns) vs DRAM (~5ns) causes a ~20x slowdown.
+        // Each table is CPU_CYCLES_PER_FRAME+64 = ~59968 bytes (~58.6 KB).
+        // Total: 3 × 58.6 KB = 175.7 KB — fits in ESP32-P4 internal SRAM.
         constexpr size_t CONTENTION_SIZE = CPU_CYCLES_PER_FRAME + 64;
         if (!contention_mode1)
         {
-            contention_mode1   = static_cast<uint8_t*>(heap_caps_calloc(CONTENTION_SIZE, 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-            contention_mode234 = static_cast<uint8_t*>(heap_caps_calloc(CONTENTION_SIZE, 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-            contention_4T      = static_cast<uint8_t*>(heap_caps_calloc(CONTENTION_SIZE, 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            contention_mode1   = static_cast<uint8_t*>(heap_caps_calloc(CONTENTION_SIZE, 1, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+            contention_mode234 = static_cast<uint8_t*>(heap_caps_calloc(CONTENTION_SIZE, 1, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+            contention_4T      = static_cast<uint8_t*>(heap_caps_calloc(CONTENTION_SIZE, 1, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
             if (!contention_mode1 || !contention_mode234 || !contention_4T)
-                esp_system_abort("Memory::Init: failed to allocate contention tables in PSRAM");
+                esp_system_abort("Memory::Init: failed to allocate contention tables in DRAM (need ~176KB internal)");
             contention_ptr = contention_mode1;
         }
 
