@@ -29,6 +29,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_system.h"
+#include "esp_log.h"
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -217,9 +218,11 @@ static bool LoadRoms()
             rom_file = OSD::MakeFilePath(PathType::Resource, "atom.rom");
     }
 
+    ESP_LOGI("memory", "LoadRoms: trying '%s'", rom_file.c_str());
     auto rom = Stream::Open(rom_file.c_str());
     if (!rom)
     {
+        ESP_LOGW("memory", "LoadRoms: failed, falling back to default samcoupe.rom");
         // Fall back on the default if a specific ROM image failed to load
         rom_file = OSD::MakeFilePath(PathType::Resource, "samcoupe.rom");
         rom = Stream::Open(rom_file.c_str());
