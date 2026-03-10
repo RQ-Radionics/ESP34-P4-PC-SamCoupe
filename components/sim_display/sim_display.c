@@ -167,7 +167,7 @@ esp_err_t sim_display_init(void)
         .dpi_clk_src         = MIPI_DSI_DPI_CLK_SRC_DEFAULT,   /* PLL_F240M */
         .dpi_clock_freq_mhz  = CONFIG_SIM_DISPLAY_PCLK_MHZ,
         .pixel_format        = LCD_COLOR_PIXEL_FORMAT_RGB888,
-        .num_fbs             = 1,  /* single buffer — no swap needed with dirty-line rendering */
+        .num_fbs             = 2,
         .video_timing = {
             .h_size            = CONFIG_SIM_DISPLAY_HACT,
             .v_size            = CONFIG_SIM_DISPLAY_VACT,
@@ -196,14 +196,15 @@ esp_err_t sim_display_init(void)
      * start as zero in the cache, but the DMA reads physical PSRAM which may
      * still contain stale data.  Flush cache → PSRAM before panel enable. */
     ESP_LOGI(TAG, "step 5 — clear framebuffers + panel enable");
-    if (esp_lcd_dpi_panel_get_frame_buffer(s_panel, 1, &s_fb[0]) == ESP_OK) {
+    if (esp_lcd_dpi_panel_get_frame_buffer(s_panel, 2, &s_fb[0], &s_fb[1]) == ESP_OK) {
         size_t fb_size = CONFIG_SIM_DISPLAY_HACT * CONFIG_SIM_DISPLAY_VACT * 3;  /* RGB888 */
-        if (s_fb[0]) {
-            memset(s_fb[0], 0, fb_size);
-            esp_cache_msync(s_fb[0], fb_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+        for (int i = 0; i < 2; i++) {
+            if (s_fb[i]) {
+                memset(s_fb[i], 0, fb_size);
+                esp_cache_msync(s_fb[i], fb_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+            }
         }
     }
-    s_fb[1] = NULL;
 
     esp_lcd_panel_init(s_panel);
     esp_lcd_panel_disp_on_off(s_panel, true);

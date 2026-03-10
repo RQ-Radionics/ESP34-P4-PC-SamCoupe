@@ -2,12 +2,12 @@
 //
 // Video.cpp: ESP32 video output via LT8912B HDMI bridge (sim_display component)
 //
-// Display: 640×480 RGB888 (pclk=25MHz, 60Hz — VESA DMT 0x04, universally supported).
+// Display: 1024×768 RGB888 (pclk=60MHz — VESA, confirmed working on this hardware).
 // SAM framebuffer: visiblearea=0 → 512×192 pixels, 1 byte/pixel (palette index).
-// Scaling: 1×H, 2×V → 512×384 image centred in 640×480.
-// Padding: 64px left/right, 48px top/bottom (black border).
+// Scaling: 1×H, 2×V → 512×384 image centred in 1024×768.
+// Padding: 256px left/right, 192px top/bottom (black border).
 //
-// DST_STRIDE = 640×3 = 1920 bytes per display row.
+// DST_STRIDE = 1024×3 = 3072 bytes per display row.
 // Each SAM row is expanded to a 1536-byte DRAM row_buf (512 pixels × RGB888),
 // then copied into the framebuffer at the correct horizontal offset (OFF_X*3).
 // Two vertically-doubled rows (dy0, dy1) are written per SAM source row.
@@ -15,12 +15,8 @@
 // Dirty line tracking: each SAM row is compared with the previous frame.
 // Only changed rows are expanded and written to PSRAM. The flush region
 // covers only the span [first_dirty .. last_dirty] (inclusive).
-// On static screens this eliminates most PSRAM writes; worst case (full
-// motion) adds only 192 × memcmp(512) = ~98KB of DRAM comparison overhead.
 //
 // pGuiScreen (OSD): 512×384 — rendered 1:1 starting at (OFF_X, OFF_Y).
-//
-// Framebuffer bandwidth: 640×480×3 = 921,600 bytes.
 
 #include "SimCoupe.h"
 #include "Video.h"
@@ -37,17 +33,17 @@ static const char* TAG = "video";
 
 // ── Display geometry ──────────────────────────────────────────────────────────
 // Must match sdkconfig.defaults CONFIG_SIM_DISPLAY_HACT/VACT.
-static constexpr int DST_W      = 640;
-static constexpr int DST_H      = 480;
-static constexpr int DST_STRIDE = DST_W * 3;   // 1920 bytes per row
+static constexpr int DST_W      = 1024;
+static constexpr int DST_H      = 768;
+static constexpr int DST_STRIDE = DST_W * 3;   // 3072 bytes per row
 
-// SAM active area: 512×192 → 2×V → 512×384, centred in 640×480
+// SAM active area: 512×192 → 2×V → 512×384, centred in 1024×768
 static constexpr int SAM_W      = 512;
 static constexpr int SAM_H      = 192;
 static constexpr int SCALED_H   = SAM_H * 2;   // 384
 static constexpr int SCALED_W   = SAM_W;        // 512 (no horizontal scaling)
-static constexpr int OFF_X      = (DST_W - SCALED_W) / 2;  // 64
-static constexpr int OFF_Y      = (DST_H - SCALED_H) / 2;  // 48
+static constexpr int OFF_X      = (DST_W - SCALED_W) / 2;  // 256
+static constexpr int OFF_Y      = (DST_H - SCALED_H) / 2;  // 192
 
 // ── ESP32Video: IVideoBase implementation ────────────────────────────────────
 
