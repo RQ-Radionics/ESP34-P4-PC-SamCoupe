@@ -160,67 +160,128 @@ void ESP32Video::Update(const FrameBuffer& fb)
     if (!dst)
         return;
 
+    // Display is always 1024×768 RGB888.
+    // The SAM framebuffer (pFrameBuffer) is src_w × src_h pixels (palette indexed).
+    // The GUI screen (pGuiScreen) is src_w × (src_h*2) — already vertically doubled.
+    //
+    // We scale 2× horizontally always. Vertically:
+    //   - pFrameBuffer: scale 2× (each source row → 2 display rows)
+    //   - pGuiScreen:   1× (already doubled by Frame::End memcpy)
+    //
+    // The framebuffer width varies with visiblearea setting:
+    //   visiblearea=0: 512px  → 1024px (exact fit)
+    //   visiblearea=1: 544px  → 1088px (overflows 64px)
+    //   visiblearea=2: 576px  → 1152px (overflows 128px)
+    //   visiblearea=3: 608px  → 1216px (overflows 192px)
+    //
+    // To handle all cases correctly: centre the scaled image in 1024×768,
+    // clipping pixels that fall outside the display bounds.
+
+    const int DST_W = 1024;
+    const int DST_H = 768;
+    const int dst_stride = DST_W * 3;
+
     const int src_w = fb.Width();
     const int src_h = fb.Height();
-    const int dst_stride = 1024 * 3; // bytes per output row
 
-    // Detect if this is the GUI screen (512×768) or SAM framebuffer (512×384)
-    // GUI screen is created as width × (height*2), so height is doubled
-    if (src_h == 768 && src_w == 512)
+    // Determine if this is pGuiScreen (height already doubled) or pFrameBuffer.
+    // pGuiScreen is created as (width, height*2) where height = frame height.
+    // pFrameBuffer is created as (width, height).
+    // We detect by checking if src_h > DST_H/2 — GUI screen is always taller.
+    const bool is_gui = (src_h > DST_H / 2);
+
+    // Scaled output dimensions
+    const int scaled_w = src_w * 2;
+    const int scaled_h = is_gui ? src_h : src_h * 2;
+
+    // Centre offset: how many display pixels to skip on left/top
+    // (negative if scaled image is smaller than display — pad with black)
+    const int off_x = (DST_W - scaled_w) / 2;  // may be negative (clip) or positive (pad)
+    const int off_y = (DST_H - scaled_h) / 2;
+
+    // Source pixel range to render (clip to display bounds)
+    // src_x_start: first source column whose scaled output is >= 0
+    // src_x_end:   first source column whose scaled output is >= DST_W
+    const int src_x_start = (off_x < 0) ? (-off_x + 1) / 2 : 0;
+    const int src_x_end   = std::min(src_w, (DST_W - std::max(off_x, 0) + 1) / 2);
+
+    // Destination X of first rendered source pixel
+    const int dst_x_start = std::max(off_x, 0) + (src_x_start * 2);
+
+    // Clear left/right padding columns if image is narrower than display
+    if (off_x > 0)
     {
-        // This is pGuiScreen (512×768) — already 2× scaled vertically
-        // Just copy directly to display (1024×768), scaling horizontally 2×
-        for (int sy = 0; sy < src_h && sy < 768; ++sy)
+        for (int dy = 0; dy < DST_H; ++dy)
         {
-            const uint8_t* src_line = fb.GetLine(sy);
-            uint8_t* dst_row = dst + sy * dst_stride;
+            memset(dst + dy * dst_stride, 0, off_x * 3);
+            int right_start = (off_x + scaled_w) * 3;
+            if (right_start < dst_stride)
+                memset(dst + dy * dst_stride + right_start, 0, dst_stride - right_start);
+        }
+    }
 
-            for (int sx = 0; sx < src_w; ++sx)
+    // Render source rows
+    const int src_y_start = (off_y < 0) ? (-off_y + (is_gui ? 1 : 0)) / (is_gui ? 1 : 2) : 0;
+    const int src_y_end   = is_gui
+        ? std::min(src_h, DST_H - std::max(off_y, 0))
+        : std::min(src_h, (DST_H - std::max(off_y, 0) + 1) / 2);
+
+    for (int sy = src_y_start; sy < src_y_end; ++sy)
+    {
+        const uint8_t* src_line = fb.GetLine(sy);
+
+        if (is_gui)
+        {
+            // GUI screen: 1 source row → 1 display row
+            int dy = off_y + sy;
+            if (dy < 0 || dy >= DST_H) continue;
+
+            uint8_t* dst_row = dst + dy * dst_stride + dst_x_start * 3;
+
+            // Clear left pad for this row if needed
+            if (off_x > 0)
+                memset(dst + dy * dst_stride, 0, off_x * 3);
+
+            for (int sx = src_x_start; sx < src_x_end; ++sx)
+            {
+                uint8_t idx = src_line[sx] & 0x7F;
+                uint8_t r = m_palette_r[idx];
+                uint8_t g = m_palette_g[idx];
+                uint8_t b = m_palette_b[idx];
+                *dst_row++ = r; *dst_row++ = g; *dst_row++ = b;
+                *dst_row++ = r; *dst_row++ = g; *dst_row++ = b;
+            }
+        }
+        else
+        {
+            // Normal framebuffer: 1 source row → 2 display rows
+            int dy0 = off_y + sy * 2;
+            int dy1 = dy0 + 1;
+
+            uint8_t* dst_row0 = (dy0 >= 0 && dy0 < DST_H) ? dst + dy0 * dst_stride + dst_x_start * 3 : nullptr;
+            uint8_t* dst_row1 = (dy1 >= 0 && dy1 < DST_H) ? dst + dy1 * dst_stride + dst_x_start * 3 : nullptr;
+
+            for (int sx = src_x_start; sx < src_x_end; ++sx)
             {
                 uint8_t idx = src_line[sx] & 0x7F;
                 uint8_t r = m_palette_r[idx];
                 uint8_t g = m_palette_g[idx];
                 uint8_t b = m_palette_b[idx];
 
-                // Write 2 pixels horizontally
-                *dst_row++ = r; *dst_row++ = g; *dst_row++ = b;
-                *dst_row++ = r; *dst_row++ = g; *dst_row++ = b;
+                if (dst_row0) { *dst_row0++ = r; *dst_row0++ = g; *dst_row0++ = b; *dst_row0++ = r; *dst_row0++ = g; *dst_row0++ = b; }
+                if (dst_row1) { *dst_row1++ = r; *dst_row1++ = g; *dst_row1++ = b; *dst_row1++ = r; *dst_row1++ = g; *dst_row1++ = b; }
             }
         }
     }
-    else
+
+    // Clear top/bottom padding rows if image is shorter than display
+    if (off_y > 0)
     {
-        // This is pFrameBuffer (512×384) — scale 2× in both dimensions
-        const int scale_h = std::min(src_h, 384);
-        for (int sy = 0; sy < scale_h; ++sy)
-        {
-            const uint8_t* src_line = fb.GetLine(sy);
-
-            // Two output rows for this source row
-            uint8_t* dst_row0 = dst + (sy * 2)     * dst_stride;
-            uint8_t* dst_row1 = dst + (sy * 2 + 1) * dst_stride;
-
-            uint8_t* p0 = dst_row0;
-            uint8_t* p1 = dst_row1;
-
-            for (int sx = 0; sx < src_w; ++sx)
-            {
-                uint8_t idx = src_line[sx] & 0x7F;
-                uint8_t r = m_palette_r[idx];
-                uint8_t g = m_palette_g[idx];
-                uint8_t b = m_palette_b[idx];
-
-                // Write pixel at (2*sx, 2*sy)
-                *p0++ = r; *p0++ = g; *p0++ = b;
-                // Write pixel at (2*sx+1, 2*sy)
-                *p0++ = r; *p0++ = g; *p0++ = b;
-
-                // Write pixel at (2*sx, 2*sy+1)
-                *p1++ = r; *p1++ = g; *p1++ = b;
-                // Write pixel at (2*sx+1, 2*sy+1)
-                *p1++ = r; *p1++ = g; *p1++ = b;
-            }
-        }
+        for (int dy = 0; dy < off_y && dy < DST_H; ++dy)
+            memset(dst + dy * dst_stride, 0, dst_stride);
+        int bottom_start = off_y + scaled_h;
+        for (int dy = bottom_start; dy < DST_H; ++dy)
+            memset(dst + dy * dst_stride, 0, dst_stride);
     }
 
     sim_display_flush();
