@@ -2,7 +2,7 @@
 //
 // Video.cpp: ESP32 video output via LT8912B HDMI bridge (sim_display component)
 //
-// Display: 1920×1080 RGB888 (pclk=70MHz, 30Hz) — Olimex production timings.
+// Display: 1920×1080 RGB888 (pclk=140MHz, ~61Hz) — production blanking × 2 pclk.
 // SAM framebuffer: visiblearea=0 → 512×192 pixels, 1 byte/pixel (palette index).
 // Scaling: 3×H, 4×V → 1536×768, centred in 1920×1080 (OFF_X=192, OFF_Y=156).
 // Aspect ratio preserved (4:3). Black borders on all four sides.
@@ -177,7 +177,7 @@ bool ESP32Video::Init()
     BuildPalette();
     memset(m_prev, 0xFF, sizeof(m_prev));
     m_initialized = true;
-    ESP_LOGI(TAG, "ESP32Video: %dx%d display, SAM %dx%d -> 3xH 4xV -> %dx%d centred (OFF_X=%d OFF_Y=%d, 1080p@30Hz)",
+    ESP_LOGI(TAG, "ESP32Video: %dx%d display, SAM %dx%d -> 3xH 4xV -> %dx%d centred (OFF_X=%d OFF_Y=%d, 1080p@60Hz)",
              DST_W, DST_H, SAM_W, SAM_H, SCALED_W, SCALED_H, OFF_X, OFF_Y);
     return true;
 }
