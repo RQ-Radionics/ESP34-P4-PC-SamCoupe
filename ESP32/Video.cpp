@@ -2,21 +2,20 @@
 //
 // Video.cpp: ESP32 video output via LT8912B HDMI bridge (sim_display component)
 //
-// Display: 1280×720 RGB888 (pclk=74.25MHz — CEA-861 VIC-4, 720p@60Hz).
+// Display: 1024×768 RGB888 (pclk=60MHz).
 // SAM framebuffer: visiblearea=0 → 512×192 pixels, 1 byte/pixel (palette index).
-// Scaling: 1×H, 2×V → 512×384 image centred in 1280×720.
-// Padding: 384px left/right, 168px top/bottom (black border).
+// Scaling: 2×H, 4×V → 1024×768 fullscreen (same 1.33:1 aspect ratio as original).
+// No padding — SAM image fills the entire display area. OFF_X=0, OFF_Y=0.
 //
-// DST_STRIDE = 1280×3 = 3840 bytes per display row.
-// Each SAM row is expanded to a 1536-byte DRAM row_buf (512 pixels × RGB888),
-// then copied into the framebuffer at the correct horizontal offset (OFF_X*3).
-// Two vertically-doubled rows (dy0, dy1) are written per SAM source row.
+// DST_STRIDE = 1024×3 = 3072 bytes per display row.
+// Each SAM row is expanded to a 3072-byte DRAM row_buf (1024 pixels × RGB888,
+// each SAM pixel doubled horizontally), then copied 4× into the framebuffer.
 //
 // Dirty line tracking: each SAM row is compared with the previous frame.
 // Only changed rows are expanded and written to PSRAM. The flush region
 // covers only the span [first_dirty .. last_dirty] (inclusive).
 //
-// pGuiScreen (OSD): 512×384 — rendered 1:1 starting at (OFF_X, OFF_Y).
+// pGuiScreen (OSD): 512×384 — rendered 2×H 2×V → 1024×768 fullscreen.
 
 #include "SimCoupe.h"
 #include "Video.h"
@@ -37,13 +36,13 @@ static constexpr int DST_W      = 1024;
 static constexpr int DST_H      = 768;
 static constexpr int DST_STRIDE = DST_W * 3;   // 3840 bytes per row
 
-// SAM active area: 512×192 → 2×V → 512×384, centred in 1280×720
+// SAM active area: 512×192 → 2×H 4×V → 1024×768 fullscreen
 static constexpr int SAM_W      = 512;
 static constexpr int SAM_H      = 192;
-static constexpr int SCALED_H   = SAM_H * 2;   // 384
-static constexpr int SCALED_W   = SAM_W;        // 512 (no horizontal scaling)
-static constexpr int OFF_X      = (DST_W - SCALED_W) / 2;  // 384
-static constexpr int OFF_Y      = (DST_H - SCALED_H) / 2;  // 168
+static constexpr int SCALED_W   = SAM_W * 2;   // 1024 (2× horizontal)
+static constexpr int SCALED_H   = SAM_H * 4;   // 768  (4× vertical)
+static constexpr int OFF_X      = 0;            // no horizontal padding
+static constexpr int OFF_Y      = 0;            // no vertical padding
 
 // ── ESP32Video: IVideoBase implementation ────────────────────────────────────
 
@@ -64,8 +63,9 @@ private:
     struct PaletteEntry { uint8_t r, g, b; };
     PaletteEntry m_palette[128]{};
 
-    // DRAM row buffer: palette expand writes here, then 2×memcpy to PSRAM.
-    alignas(4) uint8_t m_row_buf[SAM_W * 3];   // one expanded SAM row (1536 bytes)
+    // DRAM row buffer: palette expand writes here, then 4×memcpy to PSRAM.
+    // 2×H scaling: each SAM pixel written twice → DST_W pixels = 3072 bytes.
+    alignas(4) uint8_t m_row_buf[DST_W * 3];   // one expanded display row (3072 bytes)
 
     // Previous frame snapshot for dirty detection (DRAM, 512×192 = 98304 bytes).
     // When a row is dirty it is written to BOTH framebuffers so they stay in
@@ -100,8 +100,8 @@ void Exit()
 
 void NativeToSam(int& x, int& y)
 {
-    x = x - OFF_X;
-    y = (y - OFF_Y) / 2;
+    x = x / 2;   // 2× horizontal scale
+    y = y / 4;   // 4× vertical scale
 }
 
 void ResizeWindow(int /*height*/) { /* fixed */ }
@@ -158,8 +158,7 @@ bool ESP32Video::Init()
         return false;
     }
 
-    // Zero framebuffer(s) — padding rows stay black forever.
-    // Update() only writes the active area [OFF_Y .. OFF_Y+SCALED_H).
+    // Zero framebuffer(s) — ensures clean state on first frame.
     size_t fb_size = DST_W * DST_H * 3;
     memset(fb0, 0, fb_size);
     esp_cache_msync(fb0, fb_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
@@ -171,8 +170,8 @@ bool ESP32Video::Init()
     BuildPalette();
     memset(m_prev, 0xFF, sizeof(m_prev));
     m_initialized = true;
-    ESP_LOGI(TAG, "ESP32Video: %dx%d display, SAM %dx%d -> 1xH 2xV -> pad L/R %dpx T/B %dpx (dirty-track, 720p@60Hz)",
-             DST_W, DST_H, SAM_W, SAM_H, OFF_X, OFF_Y);
+    ESP_LOGI(TAG, "ESP32Video: %dx%d display, SAM %dx%d -> 2xH 4xV -> fullscreen (dirty-track, 1024x768@60Hz)",
+             DST_W, DST_H, SAM_W, SAM_H);
     return true;
 }
 
@@ -215,8 +214,8 @@ void ESP32Video::Update(const FrameBuffer& fb)
     const int src_w = fb.Width();   // 512 (normal) or 512 (GUI)
     const int src_h = fb.Height();  // 192 (normal) or 384 (GUI)
 
-    // GUI screen (512×384): rendered 1:1 starting at row OFF_Y.
-    // Normal framebuffer (512×192): 2× vertical scaling.
+    // GUI screen (512×384): rendered 2×H 2×V → 1024×768 fullscreen.
+    // Normal framebuffer (512×192): rendered 2×H 4×V → 1024×768 fullscreen.
     const bool is_gui = (src_h > SAM_H);
 
     // Detect GUI→normal transition: invalidate m_prev so dirty-line tracking
@@ -229,28 +228,37 @@ void ESP32Video::Update(const FrameBuffer& fb)
 
     if (is_gui)
     {
-        // GUI: 1 source row → 1 display row, palette expand directly to PSRAM.
-        // src_h=384, fits exactly in [OFF_Y .. OFF_Y+384) = [48..432).
-        // Horizontal: src_w=512 pixels starting at column OFF_X=64.
-        const int rows = (src_h <= DST_H - OFF_Y) ? src_h : DST_H - OFF_Y;
+        // GUI: 512×384 source → 2×H 2×V → 1024×768 fullscreen.
+        // Each source pixel written twice horizontally into m_row_buf (3072 B),
+        // then each row copied twice vertically into the framebuffer.
+        // src_h=384, 2×V → 768 display rows = DST_H exactly.
+        const int rows = (src_h <= DST_H / 2) ? src_h : DST_H / 2;
         for (int sy = 0; sy < rows; ++sy)
         {
             const uint8_t* src_line = fb.GetLine(sy);
-            uint8_t* p = dst + (OFF_Y + sy) * DST_STRIDE + OFF_X * 3;
+            // Expand 2×H into m_row_buf
+            uint8_t* p = m_row_buf;
             for (int sx = 0; sx < src_w; ++sx)
             {
                 const PaletteEntry& e = m_palette[src_line[sx] & 0x7F];
                 *p++ = e.r; *p++ = e.g; *p++ = e.b;
+                *p++ = e.r; *p++ = e.g; *p++ = e.b;
             }
+            // Copy 2×V into framebuffer (no offset — fullscreen)
+            int dy0 = sy * 2;
+            memcpy(dst + dy0       * DST_STRIDE, m_row_buf, DST_STRIDE);
+            memcpy(dst + (dy0 + 1) * DST_STRIDE, m_row_buf, DST_STRIDE);
         }
-        // Flush active GUI area then present the frame.
-        sim_display_flush_region((size_t)OFF_Y * DST_STRIDE,
-                                 (size_t)rows * DST_STRIDE);
+        // Flush entire screen and present.
+        sim_display_flush_region(0, (size_t)DST_H * DST_STRIDE);
         sim_display_swap();
     }
     else
     {
-        // Normal framebuffer: 1 source row → 2 consecutive display rows.
+        // Normal framebuffer: 512×192 → 2×H 4×V → 1024×768 fullscreen.
+        //
+        // Each SAM pixel written twice horizontally into m_row_buf (3072 B),
+        // then the row copied 4× vertically into the framebuffer.
         //
         // Dirty-line tracking: only expand+blit rows that changed.
         // Each dirty row is written to BOTH framebuffers (back and front)
@@ -273,25 +281,31 @@ void ESP32Video::Update(const FrameBuffer& fb)
 
             memcpy(prev_line, src_line, src_w);
 
+            // Expand 2×H into m_row_buf
             if (vdiag) s_expand_us -= esp_timer_get_time();
             uint8_t* p = m_row_buf;
             for (int sx = 0; sx < src_w; ++sx)
             {
                 const PaletteEntry& e = m_palette[src_line[sx] & 0x7F];
                 *p++ = e.r; *p++ = e.g; *p++ = e.b;
+                *p++ = e.r; *p++ = e.g; *p++ = e.b;
             }
             if (vdiag) s_expand_us += esp_timer_get_time();
 
+            // Copy 4×V into framebuffer (no horizontal offset — fullscreen)
             if (vdiag) s_copy_us -= esp_timer_get_time();
-            int dy0 = OFF_Y + sy * 2;
-            const size_t row_bytes = SAM_W * 3;
+            int dy0 = sy * 4;
             // Write to back buffer
-            memcpy(dst   + dy0       * DST_STRIDE + OFF_X * 3, m_row_buf, row_bytes);
-            memcpy(dst   + (dy0 + 1) * DST_STRIDE + OFF_X * 3, m_row_buf, row_bytes);
+            memcpy(dst + dy0       * DST_STRIDE, m_row_buf, DST_STRIDE);
+            memcpy(dst + (dy0 + 1) * DST_STRIDE, m_row_buf, DST_STRIDE);
+            memcpy(dst + (dy0 + 2) * DST_STRIDE, m_row_buf, DST_STRIDE);
+            memcpy(dst + (dy0 + 3) * DST_STRIDE, m_row_buf, DST_STRIDE);
             // Write to front buffer too — keeps both in sync
             if (other) {
-                memcpy(other + dy0       * DST_STRIDE + OFF_X * 3, m_row_buf, row_bytes);
-                memcpy(other + (dy0 + 1) * DST_STRIDE + OFF_X * 3, m_row_buf, row_bytes);
+                memcpy(other + dy0       * DST_STRIDE, m_row_buf, DST_STRIDE);
+                memcpy(other + (dy0 + 1) * DST_STRIDE, m_row_buf, DST_STRIDE);
+                memcpy(other + (dy0 + 2) * DST_STRIDE, m_row_buf, DST_STRIDE);
+                memcpy(other + (dy0 + 3) * DST_STRIDE, m_row_buf, DST_STRIDE);
             }
             if (vdiag) s_copy_us += esp_timer_get_time();
 
@@ -302,8 +316,8 @@ void ESP32Video::Update(const FrameBuffer& fb)
         if (vdiag) vt1 = esp_timer_get_time();
         if (first_dirty >= 0)
         {
-            int disp_first = OFF_Y + first_dirty * 2;
-            int disp_last  = OFF_Y + last_dirty  * 2 + 2;
+            int disp_first = first_dirty * 4;
+            int disp_last  = last_dirty  * 4 + 4;
             sim_display_flush_region((size_t)disp_first * DST_STRIDE,
                                      (size_t)(disp_last - disp_first) * DST_STRIDE);
         }

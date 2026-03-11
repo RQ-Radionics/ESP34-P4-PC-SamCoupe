@@ -144,7 +144,7 @@ CONFIG_SIM_DISPLAY_DSI_LANES=2
 CONFIG_SIM_DISPLAY_DSI_LANE_MBPS=896
 # 1024×768@60Hz — VESA timings, confirmed working on this hardware.
 # pclk=60MHz (PLL_F240M/4 exact). SETTLE=0x08 for vactive>600.
-# SAM active area 512×384 centred: OFF_X=256, OFF_Y=192.
+# SAM 512×192 scaled 2×H 4×V → 1024×768 fullscreen. OFF_X=0, OFF_Y=0.
 # Framebuffer: 1024×768×3 = 2.36MB.
 CONFIG_SIM_DISPLAY_HACT=1024
 CONFIG_SIM_DISPLAY_VACT=768
