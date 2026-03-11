@@ -73,6 +73,7 @@ private:
     alignas(4) uint8_t m_prev[SAM_W * SAM_H];
 
     bool m_initialized = false;
+    bool m_was_gui     = false;  // true if previous frame was GUI/OSD
 };
 
 // ── Video namespace (called by SimCoupe core) ─────────────────────────────────
@@ -217,6 +218,14 @@ void ESP32Video::Update(const FrameBuffer& fb)
     // GUI screen (512×384): rendered 1:1 starting at row OFF_Y.
     // Normal framebuffer (512×192): 2× vertical scaling.
     const bool is_gui = (src_h > SAM_H);
+
+    // Detect GUI→normal transition: invalidate m_prev so dirty-line tracking
+    // forces a full repaint of the SAM area, overwriting any GUI pixels left
+    // in the framebuffer from the previous OSD frame.
+    if (!is_gui && m_was_gui) {
+        memset(m_prev, 0xFF, sizeof(m_prev));
+    }
+    m_was_gui = is_gui;
 
     if (is_gui)
     {
