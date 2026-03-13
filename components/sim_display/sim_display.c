@@ -156,7 +156,7 @@ esp_err_t sim_display_init(void)
         .dpi_clock_freq_mhz  = CONFIG_SIM_DISPLAY_PCLK_MHZ,
         .virtual_channel     = 0,
         .in_color_format     = LCD_COLOR_PIXEL_FORMAT_RGB888,
-        .num_fbs             = 2,
+        .num_fbs             = 1,  /* production uses 1 FB — matches factory firmware */
         .video_timing = {
             .h_size            = CONFIG_SIM_DISPLAY_HACT,
             .v_size            = CONFIG_SIM_DISPLAY_VACT,
@@ -220,7 +220,8 @@ esp_err_t sim_display_init(void)
 
     /* Step 10: Get framebuffer pointers, clear to black, flush cache → PSRAM */
     ESP_LOGI(TAG, "step 10 — clear framebuffers");
-    if (esp_lcd_dpi_panel_get_frame_buffer(s_panel, 2, &s_fb[0], &s_fb[1]) == ESP_OK) {
+    if (esp_lcd_dpi_panel_get_frame_buffer(s_panel, 1, &s_fb[0]) == ESP_OK) {
+        s_fb[1] = s_fb[0];  /* single buffer — both pointers point to same FB */
         size_t fb_size = CONFIG_SIM_DISPLAY_HACT * CONFIG_SIM_DISPLAY_VACT * 3;
         for (int i = 0; i < 2; i++) {
             if (s_fb[i]) {
