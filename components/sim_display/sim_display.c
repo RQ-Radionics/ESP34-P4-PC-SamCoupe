@@ -32,6 +32,7 @@
 static const char *TAG = "sim_display";
 static esp_lcd_panel_handle_t s_panel    = NULL;
 static i2c_master_bus_handle_t s_i2c_bus = NULL;
+static esp_lcd_panel_io_handle_t s_io_main = NULL;  /* LT8912B main I2C IO (0x48) */
 static void *s_fb[2]  = {NULL, NULL};
 static int   s_back_buf = 1;  /* index of back buffer (the one we write to) */
 
@@ -130,8 +131,16 @@ esp_err_t sim_display_init(void)
     esp_lcd_panel_io_i2c_config_t io_cfg_cec  = LT8912B_IO_CFG(400 * 1000, LT8912B_IO_I2C_CEC_ADDRESS);
     esp_lcd_panel_io_i2c_config_t io_cfg_avi  = LT8912B_IO_CFG(400 * 1000, LT8912B_IO_I2C_AVI_ADDRESS);
 
-    if (esp_lcd_new_panel_io_i2c(s_i2c_bus, &io_cfg_main, &io_main) != ESP_OK ||
-        esp_lcd_new_panel_io_i2c(s_i2c_bus, &io_cfg_cec,  &io_cec_dsi) != ESP_OK ||
+    if (esp_lcd_new_panel_io_i2c(s_i2c_bus, &io_cfg_main, &s_io_main) != ESP_OK) {
+        ESP_LOGE(TAG, "LT8912B main panel IO creation failed");
+        i2c_del_master_bus(s_i2c_bus);
+        s_i2c_bus = NULL;
+        esp_lcd_del_dsi_bus(dsi_bus);
+        return ESP_FAIL;
+    }
+    io_main = s_io_main;
+
+    if (esp_lcd_new_panel_io_i2c(s_i2c_bus, &io_cfg_cec,  &io_cec_dsi) != ESP_OK ||
         esp_lcd_new_panel_io_i2c(s_i2c_bus, &io_cfg_avi,  &io_avi) != ESP_OK) {
         ESP_LOGE(TAG, "LT8912B panel IO creation failed");
         i2c_del_master_bus(s_i2c_bus);
@@ -222,23 +231,32 @@ esp_err_t sim_display_init(void)
     }
     ESP_LOGI(TAG, "step 10 OK");
 
-    /* Step 11: Wait for DPI signal to stabilise, then re-trigger LT8912B input detection.
+    /* Step 11: MIPI RX logic reset after DPI is active.
      *
-     * panel_lt8912b_init() calls detect_input BEFORE the DPI is active (it sees 0xff/0xff).
-     * After lt8912b->init(panel) starts the DPI, the LT8912B needs to re-lock to the signal.
-     * esp_lcd_panel_lt8912b_is_ready() calls detect_input + checks HPD — calling it repeatedly
-     * gives the chip time to lock and re-programs the video setup with the live signal. */
-    ESP_LOGI(TAG, "step 11 — waiting for LT8912B to lock to DPI signal...");
-    bool connected = false;
-    for (int i = 0; i < 20; i++) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-        connected = esp_lcd_panel_lt8912b_is_ready(s_panel);
-        if (connected) {
-            ESP_LOGI(TAG, "  locked after %d ms", (i + 1) * 100);
-            break;
-        }
-    }
-    ESP_LOGI(TAG, "step 11 OK");
+     * panel_lt8912b_init() runs the full init sequence but the DPI starts AFTER
+     * lt8912b->init(panel) is called at the very end. The MIPI RX reset inside
+     * panel_lt8912b_init() fires before the DPI is active (sees 0xff/0xff hsync).
+     * We must re-do the MIPI RX reset + DDS reset now that the DPI is running,
+     * so the LT8912B locks to the live signal and outputs valid HDMI timing.
+     *
+     * Registers (main I2C, 0x48):
+     *   0x03 = 0x7f → MIPI RX reset assert
+     *   0x03 = 0xff → MIPI RX reset deassert
+     *   0x05 = 0xfb → DDS reset assert
+     *   0x05 = 0xff → DDS reset deassert */
+    ESP_LOGI(TAG, "step 11 — MIPI RX + DDS reset after DPI active");
+    vTaskDelay(pdMS_TO_TICKS(50));  /* let DPI stabilise first */
+    esp_lcd_panel_io_tx_param(s_io_main, 0x03, (uint8_t[]){0x7f}, 1);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    esp_lcd_panel_io_tx_param(s_io_main, 0x03, (uint8_t[]){0xff}, 1);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    esp_lcd_panel_io_tx_param(s_io_main, 0x05, (uint8_t[]){0xfb}, 1);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    esp_lcd_panel_io_tx_param(s_io_main, 0x05, (uint8_t[]){0xff}, 1);
+    vTaskDelay(pdMS_TO_TICKS(100));  /* wait for PLL to re-lock */
+
+    bool connected = esp_lcd_panel_lt8912b_is_ready(s_panel);
+    ESP_LOGI(TAG, "step 11 OK — HPD=%s", connected ? "connected" : "no cable");
 
     ESP_LOGI(TAG, "%dx%d@%dMHz ready%s",
              CONFIG_SIM_DISPLAY_HACT, CONFIG_SIM_DISPLAY_VACT, CONFIG_SIM_DISPLAY_PCLK_MHZ,
