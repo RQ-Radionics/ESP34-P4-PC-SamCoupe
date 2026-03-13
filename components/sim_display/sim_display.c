@@ -156,7 +156,7 @@ esp_err_t sim_display_init(void)
         .dpi_clock_freq_mhz  = CONFIG_SIM_DISPLAY_PCLK_MHZ,
         .virtual_channel     = 0,
         .in_color_format     = LCD_COLOR_PIXEL_FORMAT_RGB888,
-        .num_fbs             = 1,  /* production uses 1 FB — matches factory firmware */
+        .num_fbs             = 2,
         .video_timing = {
             .h_size            = CONFIG_SIM_DISPLAY_HACT,
             .v_size            = CONFIG_SIM_DISPLAY_VACT,
@@ -170,12 +170,32 @@ esp_err_t sim_display_init(void)
         .flags.disable_lp    = true,
     };
 
-    /* Step 5: Video timing for LT8912B — matches factory firmware exactly.
-     * vic=2 causes the monitor to report 60Hz (frame doubling in LT8912B or monitor).
-     * aspect_ratio=0 (no data), as found in factory firmware dump. */
-    esp_lcd_panel_lt8912b_video_timing_t video_timing = ESP_LCD_LT8912B_VIDEO_TIMING_1920x1080_30Hz();
-    video_timing.vic         = 2;
-    video_timing.aspect_ratio = 0;
+    /* Step 5: Video timing for LT8912B — 1920x1080 with frame-doubling.
+     *
+     * DPI pixel clock = 60MHz (PLL_F240M/4, exact → IDF 5.5.3 brg_comp=0).
+     * LT8912B uses pclk_mhz to configure its DDS (MIPI RX lock frequency).
+     * pclk_mhz must match the DPI clock we actually send (60MHz), NOT the
+     * HDMI output clock (120MHz).  The LT8912B frame-doubles internally:
+     * it receives ~26Hz DPI frames and outputs 60Hz HDMI to the monitor.
+     *
+     * htotal/vtotal/blanking match the 1080p@60Hz macro but pclk_mhz=60. */
+    esp_lcd_panel_lt8912b_video_timing_t video_timing = {
+        .hfp        = 48,
+        .hs         = 32,
+        .hbp        = 80,
+        .hact       = 1920,
+        .htotal     = 2080,
+        .vfp        = 3,
+        .vs         = 5,
+        .vbp        = 19,
+        .vact       = 1080,
+        .vtotal     = 1107,
+        .h_polarity = 1,
+        .v_polarity = 0,
+        .vic        = 0,
+        .aspect_ratio = LT8912B_ASPECT_RATION_16_9,
+        .pclk_mhz   = CONFIG_SIM_DISPLAY_PCLK_MHZ,  /* 60 — must match DPI clock */
+    };
 
     /* Step 6: Vendor config */
     lt8912b_vendor_config_t vendor_cfg = {
@@ -194,7 +214,7 @@ esp_err_t sim_display_init(void)
     };
 
     /* Step 8: Create LT8912B panel (wraps DPI panel) */
-    ESP_LOGI(TAG, "step 4-8 — esp_lcd_new_panel_lt8912b @ %dx%d pclk=%dMHz",
+    ESP_LOGI(TAG, "step 4-8 — esp_lcd_new_panel_lt8912b @ %dx%d pclk=%dMHz (DPI ~26Hz, HDMI 60Hz via frame-double)",
              CONFIG_SIM_DISPLAY_HACT, CONFIG_SIM_DISPLAY_VACT, CONFIG_SIM_DISPLAY_PCLK_MHZ);
     esp_lcd_panel_lt8912b_io_t io_all = {
         .main    = io_main,
@@ -220,8 +240,7 @@ esp_err_t sim_display_init(void)
 
     /* Step 10: Get framebuffer pointers, clear to black, flush cache → PSRAM */
     ESP_LOGI(TAG, "step 10 — clear framebuffers");
-    if (esp_lcd_dpi_panel_get_frame_buffer(s_panel, 1, &s_fb[0]) == ESP_OK) {
-        s_fb[1] = s_fb[0];  /* single buffer — both pointers point to same FB */
+    if (esp_lcd_dpi_panel_get_frame_buffer(s_panel, 2, &s_fb[0], &s_fb[1]) == ESP_OK) {
         size_t fb_size = CONFIG_SIM_DISPLAY_HACT * CONFIG_SIM_DISPLAY_VACT * 3;
         for (int i = 0; i < 2; i++) {
             if (s_fb[i]) {

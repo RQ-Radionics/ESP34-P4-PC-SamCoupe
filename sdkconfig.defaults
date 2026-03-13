@@ -59,6 +59,11 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 # sys_evt task needs extra room with PSRAM/logging overhead
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
 
+# ── CPU frequency ─────────────────────────────────────────────────────────
+# Match Olimex production BSP: 360MHz (not the IDF default which may be lower)
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_360=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=360
+
 # ── Compiler optimisation ─────────────────────────────────────────────────
 # Use -O2 globally (performance mode). The default DEBUG mode uses -Og which
 # is far too slow for Z80 emulation. simcoupe_core also sets -O2 explicitly
@@ -142,23 +147,30 @@ CONFIG_SIM_DISPLAY_DSI_LANES=2
 # 720p@60Hz custom: pclk=120MHz (PLL_F240M/2, exact) × 24bpp = 2880Mbps / 2 lanes = 1440Mbps.
 # Within ESP32-P4 PHY limit of 1500Mbps/lane.
 CONFIG_SIM_DISPLAY_DSI_LANE_MBPS=1000
-# 1920×1080@30Hz — Olimex production timings (extracted from factory firmware).
-# pclk=70MHz, lane=1000Mbps. Confirmed working on HP P244 and Ramon's monitor.
-# SAM 512×192 scaled 3×H 4×V → 1536×768, centred in 1920×1080. OFF_X=192, OFF_Y=156.
+# 1920×1080 via LT8912B frame-doubling — DPI runs at ~26Hz, monitor sees 60Hz.
+#
+# IDF 5.5.3 added horizontal timing compensation:
+#   brg_comp = round(real_pclk / expect_pclk × htotal) - htotal
+# With expect=64MHz and real=60MHz (PLL_F240M/4): brg_comp=-130 → broken timing.
+# Fix: set pclk=60MHz (= real), so real==expect → brg_comp=0.
+#
+# pclk=60MHz (PLL_F240M/4, exact), htotal=2080, vtotal=1107 → 26.06Hz DPI.
+# LT8912B frame-doubles → monitor sees 60Hz.
+# Lane rate: 60MHz × 24bpp / 2 lanes = 720 Mbps/lane (well within 1500Mbps limit).
+# SAM 512×192 scaled 3×H 5×V → 1536×960, centred in 1920×1080. OFF_X=192, OFF_Y=60.
 # Framebuffer: 1920×1080×3 = 6.22MB.
 CONFIG_SIM_DISPLAY_HACT=1920
 CONFIG_SIM_DISPLAY_VACT=1080
-CONFIG_SIM_DISPLAY_PCLK_MHZ=70
+CONFIG_SIM_DISPLAY_PCLK_MHZ=60
 CONFIG_SIM_DISPLAY_HS=32
 CONFIG_SIM_DISPLAY_HFP=48
 CONFIG_SIM_DISPLAY_HBP=80
 CONFIG_SIM_DISPLAY_VS=5
 CONFIG_SIM_DISPLAY_VFP=3
-CONFIG_SIM_DISPLAY_VBP=8
+CONFIG_SIM_DISPLAY_VBP=19
 CONFIG_SIM_DISPLAY_HSYNC_POL=1
 CONFIG_SIM_DISPLAY_VSYNC_POL=0
-CONFIG_SIM_DISPLAY_SETTLE=0x10
-# DDS fixed production values (0x93/0x3E/0x29) — confirmed in factory firmware dump.
+CONFIG_SIM_DISPLAY_SETTLE=0x08
 CONFIG_SIM_DISPLAY_DDS_0=0x93
 CONFIG_SIM_DISPLAY_DDS_1=0x3E
 CONFIG_SIM_DISPLAY_DDS_2=0x29
