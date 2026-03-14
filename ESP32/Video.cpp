@@ -191,9 +191,11 @@ void ESP32Video::BuildPalette()
     auto palette = IO::Palette();
     for (size_t i = 0; i < palette.size() && i < 128; ++i)
     {
+        // DPI at 24MHz sends bytes in R,B,G order to LT8912B (hardware quirk).
+        // Compensate by swapping G and B channels in the palette.
         m_palette[i].r = palette[i].red;
-        m_palette[i].g = palette[i].green;
-        m_palette[i].b = palette[i].blue;
+        m_palette[i].g = palette[i].blue;
+        m_palette[i].b = palette[i].green;
     }
 }
 
