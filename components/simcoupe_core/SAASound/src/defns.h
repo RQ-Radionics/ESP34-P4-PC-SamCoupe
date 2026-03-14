@@ -52,7 +52,7 @@
 #define CONFIG_FILE_PATH "SAASound.cfg"
 #endif // USE_CONFIG_FILE
 
-#define DEFAULT_UNBOOSTED_MULTIPLIER 68.0f   /* was 11.35 — scaled up 6x for ESP32 output level */
+#define DEFAULT_UNBOOSTED_MULTIPLIER 32.0f   /* tuned for ESP32: peak ~20000/32767 at typical SAM output */
 
 #define DEFAULT_BOOST 1
 
