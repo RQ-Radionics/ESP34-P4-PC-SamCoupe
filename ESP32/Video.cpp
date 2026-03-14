@@ -273,8 +273,7 @@ void ESP32Video::Update(const FrameBuffer& fb)
     else
     {
         // Normal: 512×192 → 2×H 3×V → 1024×576, centred (OFF_X=128, OFF_Y=72).
-        // Each dirty SAM row expanded into m_row_buf then copied 3× into PSRAM.
-        // Written to both framebuffers to keep double-buffer in sync.
+        // Write dirty lines to BOTH framebuffers to keep double-buffer in sync.
         void* fb0_ptr = nullptr;
         void* fb1_ptr = nullptr;
         sim_display_get_framebuffer(&fb0_ptr, &fb1_ptr);
@@ -304,7 +303,7 @@ void ESP32Video::Update(const FrameBuffer& fb)
             }
             if (vdiag) s_expand_us += esp_timer_get_time();
 
-            // Copy 3×V into framebuffer at OFF_Y + sy*3
+            // Copy 3×V into both framebuffers
             if (vdiag) s_copy_us -= esp_timer_get_time();
             int dy0 = OFF_Y + sy * 3;
             memcpy(dst + dy0       * DST_STRIDE, m_row_buf, DST_STRIDE);
@@ -326,8 +325,20 @@ void ESP32Video::Update(const FrameBuffer& fb)
         {
             int disp_first = OFF_Y + first_dirty * 3;
             int disp_last  = OFF_Y + last_dirty  * 3 + 3;
-            sim_display_flush_region((size_t)disp_first * DST_STRIDE,
-                                     (size_t)(disp_last - disp_first) * DST_STRIDE);
+            size_t flush_bytes = (size_t)(disp_last - disp_first) * DST_STRIDE;
+
+            static uint32_t s_vid_frame = 0; s_vid_frame++;
+            if ((s_vid_frame % 250) == 0) {
+                int64_t t0d = esp_timer_get_time();
+                sim_display_flush_region((size_t)disp_first * DST_STRIDE, flush_bytes);
+                int64_t t1d = esp_timer_get_time();
+                ESP_LOGI("vidperf", "dirty=%d/%d msync=%lldus flush_kb=%u",
+                         last_dirty - first_dirty + 1, SAM_H,
+                         (long long)(t1d - t0d),
+                         (unsigned)(flush_bytes / 1024));
+            } else {
+                sim_display_flush_region((size_t)disp_first * DST_STRIDE, flush_bytes);
+            }
         }
         // Swap once per frame — present back buffer regardless of dirty count.
         // (On a fully static frame with no dirty lines the display content is
