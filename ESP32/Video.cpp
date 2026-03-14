@@ -234,23 +234,40 @@ void ESP32Video::Update(const FrameBuffer& fb)
 
     if (is_gui)
     {
-        // GUI: 512×384 → 2×H 1×V → 1024×384, centred en 1280×720 (OFF_Y=168).
-        const int gui_off_y = (DST_H - src_h) / 2;
-        const int rows = (src_h <= DST_H) ? src_h : DST_H;
-        for (int sy = 0; sy < rows; ++sy)
+        // GUI: 512×384 → 2×H 1.5×V → 1024×576, centred in 1280×720 (same
+        // footprint as the normal game area). 1.5×V = every 2 source rows
+        // produce 3 display rows (pattern: A A B  A B B  repeating per pair).
+        // OFF_X=128, OFF_Y=72 (same as game).
+        // Source has 384 rows = 192 pairs → 192×3 = 576 display rows. Exact fit.
+        const int gui_first = OFF_Y;   // 72
+        const int pairs = src_h / 2;  // 192
+        for (int p2 = 0; p2 < pairs; ++p2)
         {
-            const uint8_t* src_line = fb.GetLine(sy);
+            const uint8_t* lineA = fb.GetLine(p2 * 2);
+            const uint8_t* lineB = fb.GetLine(p2 * 2 + 1);
+
+            // Expand lineA 2×H
             uint8_t* p = m_row_buf + OFF_X * 3;
-            for (int sx = 0; sx < src_w; ++sx)
-            {
-                const PaletteEntry& e = m_palette[src_line[sx] & 0x7F];
+            for (int sx = 0; sx < src_w; ++sx) {
+                const PaletteEntry& e = m_palette[lineA[sx] & 0x7F];
                 *p++ = e.r; *p++ = e.g; *p++ = e.b;
                 *p++ = e.r; *p++ = e.g; *p++ = e.b;
             }
-            memcpy(dst + (gui_off_y + sy) * DST_STRIDE, m_row_buf, DST_STRIDE);
+            int dy = gui_first + p2 * 3;
+            memcpy(dst + dy       * DST_STRIDE, m_row_buf, DST_STRIDE); // A
+            memcpy(dst + (dy + 1) * DST_STRIDE, m_row_buf, DST_STRIDE); // A
+
+            // Expand lineB 2×H
+            p = m_row_buf + OFF_X * 3;
+            for (int sx = 0; sx < src_w; ++sx) {
+                const PaletteEntry& e = m_palette[lineB[sx] & 0x7F];
+                *p++ = e.r; *p++ = e.g; *p++ = e.b;
+                *p++ = e.r; *p++ = e.g; *p++ = e.b;
+            }
+            memcpy(dst + (dy + 2) * DST_STRIDE, m_row_buf, DST_STRIDE); // B
         }
-        sim_display_flush_region((size_t)gui_off_y * DST_STRIDE,
-                                 (size_t)rows * DST_STRIDE);
+        sim_display_flush_region((size_t)gui_first * DST_STRIDE,
+                                 (size_t)576 * DST_STRIDE);
         sim_display_swap();
     }
     else
