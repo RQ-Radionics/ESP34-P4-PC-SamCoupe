@@ -31,7 +31,7 @@ struct Config
 
     bool tvaspect = true;               // TV pixel aspect ratio?
     bool fullscreen = false;            // Start in full-screen mode?
-    int visiblearea = 2;                // How much of the borders to show (2=TV Visible)
+    int visiblearea = 1;                // How much of the borders to show (1=8px border, fits 640x480)
     bool smooth = true;                 // Smooth image when stretching? (disables integer scaling)
     bool allowmotionblur = false;       // Motion blur looks awful without VRR, so hide/disable for now
     bool motionblur = false;            // Motion blur to reduce animation flicker?
