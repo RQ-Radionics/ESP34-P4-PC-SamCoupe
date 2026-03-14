@@ -93,9 +93,10 @@ bool Init()
     auto height = (s_view_bottom - s_view_top);
 
     pFrameBuffer = std::make_unique<FrameBuffer>(width, height);
-    // GUI screen must be wide enough for all dialogs (FileDialog = 527px wide).
-    // Use 560x384 to give comfortable margin without wasting DRAM.
-    pGuiScreen = std::make_unique<FrameBuffer>(560, height * 2);
+    // GUI screen must be wide enough (FileDialog=527px) and tall enough
+    // (FileDialog=361px + TITLE_HEIGHT=20 + Centre() margin >= 406) for all dialogs.
+    // 560x420: width fits 527px dialog, height keeps title bar on-screen.
+    pGuiScreen = std::make_unique<FrameBuffer>(560, 420);
 
     Flyback();
     return true;

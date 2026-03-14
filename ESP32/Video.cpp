@@ -237,10 +237,11 @@ void ESP32Video::Update(const FrameBuffer& fb)
     if (is_gui)
     {
         // GUI: src_w x src_h -> 1xH 1xV, centred in 640x480.
-        // src_w may be 560 (wider than SAM_W=512) to fit FileDialog (527px wide).
+        // src_w=560, src_h=420 -> gui_off_x=40, gui_off_y=30.
         const int gui_off_x = (src_w < DST_W) ? (DST_W - src_w) / 2 : 0;
-        const int gui_w     = (src_w <= DST_W) ? src_w : DST_W;
-        const int rows      = (src_h <= DST_H - OFF_Y) ? src_h : DST_H - OFF_Y;
+        const int gui_off_y = (src_h < DST_H) ? (DST_H - src_h) / 2 : 0;
+        const int gui_w = (src_w <= DST_W) ? src_w : DST_W;
+        const int rows  = (src_h <= DST_H - gui_off_y) ? src_h : DST_H - gui_off_y;
         for (int sy = 0; sy < rows; ++sy)
         {
             const uint8_t* src_line = fb.GetLine(sy);
@@ -249,9 +250,9 @@ void ESP32Video::Update(const FrameBuffer& fb)
                 const PaletteEntry& e = m_palette[src_line[sx] & 0x7F];
                 *p++ = e.r; *p++ = e.g; *p++ = e.b;
             }
-            memcpy(dst + (OFF_Y + sy) * DST_STRIDE, m_row_buf, DST_STRIDE);
+            memcpy(dst + (gui_off_y + sy) * DST_STRIDE, m_row_buf, DST_STRIDE);
         }
-        sim_display_flush_region((size_t)OFF_Y * DST_STRIDE,
+        sim_display_flush_region((size_t)gui_off_y * DST_STRIDE,
                                  (size_t)rows * DST_STRIDE);
         sim_display_swap();
     }
