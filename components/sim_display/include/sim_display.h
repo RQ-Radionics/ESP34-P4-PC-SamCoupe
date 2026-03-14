@@ -80,6 +80,16 @@ esp_err_t sim_display_flush_region(size_t byte_offset, size_t byte_size);
  */
 esp_err_t sim_display_swap(void);
 
+/**
+ * @brief Check for HDMI hotplug and reinitialise LT8912B if needed.
+ *
+ * Detects HPD low→high transitions (monitor connected after boot or
+ * cable reconnect) and re-runs post_dpi_enable() to re-lock the TMDS PLL.
+ * Call periodically from the main loop (e.g. every ~1 second via a frame
+ * counter in IO::FrameUpdate).
+ */
+void sim_display_check_hotplug(void);
+
 #ifdef __cplusplus
 }
 #endif

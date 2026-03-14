@@ -79,14 +79,16 @@ static esp_err_t audio_i2s_init(void)
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(
         CONFIG_SIM_AUDIO_I2S_NUM, I2S_ROLE_MASTER);
     chan_cfg.auto_clear    = true;
-    chan_cfg.dma_desc_num  = 2;    /* 2 DMA descriptors = 40ms buffer.
-                                    * With 4 descriptors the ring had too much
-                                    * headroom and i2s_channel_write never
-                                    * blocked, letting sound_task run ahead of
-                                    * the DMA and causing periodic glitches.
-                                    * 2 descriptors forces backpressure: the
-                                    * write blocks as soon as one descriptor is
-                                    * in flight, locking sound to DMA rate. */
+    chan_cfg.dma_desc_num  = 4;    /* 4 DMA descriptors = 80ms buffer.
+                                    * With 2 descriptors the ring was too tight:
+                                    * any FreeRTOS jitter (video, IO, USB) could
+                                    * drain both descriptors before FlushAudio()
+                                    * refilled them, causing a one-frame dropout
+                                    * (auto_clear fills with zeros → audible
+                                    * microcorte).  4 descriptors gives 80ms of
+                                    * headroom while sim_audio_wait_frame_done()
+                                    * (ISR on_sent, fires every 20ms) still acts
+                                    * as the crystal-accurate 50fps throttle. */
     chan_cfg.dma_frame_num = 441;  /* one SAM frame per DMA descriptor */
     ESP_RETURN_ON_ERROR(
         i2s_new_channel(&chan_cfg, &s_i2s_tx, NULL),

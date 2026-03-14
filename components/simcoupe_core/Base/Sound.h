@@ -43,8 +43,8 @@ public:
     static void FrameUpdate();
 
     // FlushAudio: write the last FrameUpdate buffer to I2S (blocks on DMA).
-    // Call from Core 1 AFTER taking s_sound_done, so Core 0 can synthesise
-    // the next frame in parallel while Core 1 is blocked writing this one.
+    // Call from Core 0 (sound_task) AFTER FrameUpdate + wait_frame_done,
+    // so the Z80 on Core 1 is never paused for audio I/O.
     static void FlushAudio();
 };
 

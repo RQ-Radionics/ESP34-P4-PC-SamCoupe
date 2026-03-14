@@ -54,6 +54,7 @@ static const char* TAG_PERF = "z80perf";
 #include "Tape.h"
 #include "UI.h"
 #include "sim_audio.h"
+#include "sim_display.h"
 
 // ── Core 0 sound task ────────────────────────────────────────────────────────
 // Sound::FrameUpdate() (dominated by SAASound synthesis, ~75ms at 44100Hz,
@@ -82,9 +83,13 @@ static void sound_task(void* /*arg*/)
 
         if (!s_sound_turbo) {
             Sound::FrameUpdate();
+            // FlushAudio blocks on the I2S DMA (~20ms) — this is the 50fps throttle.
+            // Running it here on Core 0 means the Z80 on Core 1 is never paused.
+            sim_audio_wait_frame_done(portMAX_DELAY);
+            Sound::FlushAudio();
         }
 
-        // Signal Core 1 that synthesis is done (SAA registers are safe to write)
+        // Signal Core 1 that synthesis + flush are done (safe to start next frame)
         xSemaphoreGive(s_sound_done);
     }
 }
@@ -283,14 +288,13 @@ void Run()
             Frame::Flyback();
             CPU::frame_cycles %= CPU_CYCLES_PER_FRAME;
 
-            // Correct audio pipeline:
-            //   1. take s_sound_done  — wait for Core 0 FrameUpdate(N-1) done
-            //   2. give s_sound_start — Core 0 starts FrameUpdate(N) — no race:
-            //                           Z80 for frame N is already done above
-            //   3. wait_frame_done()  — crystal-accurate 50fps throttle (ISR)
-            //   4. FlushAudio(N-1)    — write previous frame to I2S DMA
+            // Audio pipeline — Z80 never pauses for audio:
+            //   Core 1: Z80(N) → video(N) → io → take s_sound_done → give s_sound_start → Z80(N+1)
+            //   Core 0: take s_sound_start → FrameUpdate(N) → wait_frame_done → FlushAudio(N) → give s_sound_done
             //
-            // Core 0 synthesises frame N IN PARALLEL with Core 1's I2S write.
+            // Core 1 takes s_sound_done only to ensure Core 0 has finished writing
+            // the PREVIOUS frame's buffer to I2S before Core 1 overwrites SAA registers.
+            // The actual 50fps throttle is wait_frame_done() on Core 0 — not here.
             int64_t t_snd0 = 0, t_snd1 = 0;
             if (s_sound_start) {
                 t_snd0 = esp_timer_get_time();
@@ -298,19 +302,19 @@ void Run()
                 t_snd1 = esp_timer_get_time();
                 s_sound_turbo = Frame::TurboMode();
                 xSemaphoreGive(s_sound_start);
-                if (!s_sound_turbo) {
-                    sim_audio_wait_frame_done(portMAX_DELAY);
-                    Sound::FlushAudio();
-                }
             }
             t2d = esp_timer_get_time();
 
-            // Periodic perf log every 250 frames (~5s)
+            // Periodic tasks every N frames
             static uint32_t s_perf_frame = 0;
             s_perf_frame++;
+
+            // HDMI hotplug check every 50 frames (~1s)
+            if ((s_perf_frame % 50) == 0)
+                sim_display_check_hotplug();
             if ((s_perf_frame % 250) == 0) {
                 ESP_LOGI(TAG_PERF,
-                         "perf: z80=%lld vid=%lld io=%lld snd_wait=%lld total=%lld (us)",
+                         "perf: z80=%lld vid=%lld io=%lld core1_idle=%lld total=%lld (us)",
                          (long long)(t1 - t0),
                          (long long)(t2 - t1),
                          (long long)(t2c - t2b),

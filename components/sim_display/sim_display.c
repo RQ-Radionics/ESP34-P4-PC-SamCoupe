@@ -280,3 +280,22 @@ esp_err_t sim_display_swap(void)
     if (s_fb[1]) s_back_buf ^= 1;
     return ESP_OK;
 }
+
+void sim_display_check_hotplug(void)
+{
+    /* Initialise s_was_connected to true on first call so that a monitor
+     * already connected at boot does not trigger a spurious reinit. */
+    static int s_first = 1;
+    static bool s_was_connected = false;
+    if (s_first) {
+        s_was_connected = esp_lcd_lt8912b_is_connected();
+        s_first = 0;
+        return;
+    }
+    bool now_connected = esp_lcd_lt8912b_is_connected();
+    if (now_connected && !s_was_connected) {
+        ESP_LOGI(TAG, "HPD: monitor connected — reinitialising LT8912B");
+        esp_lcd_lt8912b_post_dpi_enable();
+    }
+    s_was_connected = now_connected;
+}
