@@ -20,6 +20,13 @@
 set(SIMCOUPE_BASE "${CMAKE_CURRENT_SOURCE_DIR}/Base")
 set(EXTERN_DIR    "${CMAKE_CURRENT_SOURCE_DIR}/extern")
 
+# ── Z80_JLS sources ──────────────────────────────────────────────────────
+set(Z80JLS_DIR "${EXTERN_DIR}/Z80_JLS")
+set(Z80JLS_SRCS
+    ${Z80JLS_DIR}/Z80_JLS.cpp
+    ${SIMCOUPE_BASE}/Z80Ops_SAM.cpp
+)
+
 # ── SimCoupe Base sources ──────────────────────────────────────────────────
 set(BASE_SRCS
     ${SIMCOUPE_BASE}/Actions.cpp
@@ -155,7 +162,7 @@ idf_component_register(
         ${BASE_SRCS}
         ${FMT_SRCS}
         ${SAASOUND_SRCS}
-
+        ${Z80JLS_SRCS}
         ${LIBSPECTRUM_SRCS}
         ${ESP32_SRCS}
     INCLUDE_DIRS
@@ -170,6 +177,7 @@ idf_component_register(
         "${CMAKE_CURRENT_SOURCE_DIR}/SDL"
         ${EXTERN_DIR}
         ${EXTERN_DIR}/z80
+        ${Z80JLS_DIR}/include
         ${EXTERN_DIR}/fmt/include
         ${SAASOUND_DIR}/src
         ${SAASOUND_DIR}/include

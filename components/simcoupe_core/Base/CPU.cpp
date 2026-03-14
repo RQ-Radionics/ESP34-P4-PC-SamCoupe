@@ -113,14 +113,10 @@ static void sound_task_init()
     );
 }
 
-sam_cpu cpu;
-
-////////////////////////////////////////////////////////////////////////////////
-//  H E L P E R   M A C R O S
-
-
 bool g_fBreak, g_fPaused;
 int g_nTurbo;
+
+sam_cpu_shim cpu;  // compatibility shim for Debug.cpp / Breakpoint.cpp
 
 constexpr auto max_boot_frames{ 200 };
 int boot_frames;
@@ -143,11 +139,12 @@ bool Init(bool fFirstInit_/*=false*/)
 
     if (fFirstInit_)
     {
+        Z80Ops_SAM_init();   // assign Z80_JLS function pointers + Z80::create()
+
         InitEvents();
         AddEvent(EventType::FrameInterrupt, 0);
         AddEvent(EventType::InputUpdate, CPU_CYCLES_PER_FRAME * 3 / 4);
 
-        cpu.on_reset(false);
         fRet &= Memory::Init(true) && IO::Init();
     }
 
@@ -195,15 +192,13 @@ void ExecuteChunk()
 
     for (g_fBreak = false; !g_fBreak; )
     {
-        cpu.on_step();
+        Z80::execute();
         if (perf_active) s_perf_insns++;
 
         CheckEvents(CPU::frame_cycles);
 
-        if ((~IO::State().status & STATUS_INT_MASK) && Memory::full_contention)
-            cpu.on_handle_active_int();
-
-        if (cpu.get_iregp_kind() != z80::iregp::hl)
+        // If Z80 is in a prefix state (DD/FD/CB/ED), don't check breakpoints yet
+        if (Z80::getPrefixOpcode() != 0)
             continue;
 
 #ifdef _DEBUG
@@ -329,7 +324,7 @@ void Reset(bool active)
     reset_asserted = active;
     if (reset_asserted)
     {
-        cpu.on_reset(true);
+        Z80::reset();
 
         Keyin::Stop();
         Tape::Stop();
@@ -343,7 +338,7 @@ void Reset(bool active)
 
 void NMI()
 {
-    cpu.initiate_nmi();
+    Z80::triggerNMI();
     Debug::Refresh();
 }
 
