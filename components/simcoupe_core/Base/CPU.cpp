@@ -283,8 +283,13 @@ void Run()
             t2d = esp_timer_get_time();
             CPU::frame_cycles %= CPU_CYCLES_PER_FRAME;
 
-            // Wait for Core 0 to finish the PREVIOUS frame's Sound::FrameUpdate()
-            // before signalling it to start the next one.
+            // Pipeline (Core 1):
+            //   1. take s_sound_done  — wait for Core 0 synthesis to finish
+            //   2. give s_sound_start — Core 0 starts synthesising NEXT frame
+            //   3. FlushAudio()       — Core 1 writes THIS frame to I2S (~20ms)
+            //
+            // Core 0 synthesises next frame IN PARALLEL with Core 1's I2S write.
+            // snd_wait should drop to ~0 (synthesis << 20ms write).
             int64_t t_snd0 = 0, t_snd1 = 0;
             if (s_sound_start) {
                 t_snd0 = esp_timer_get_time();
@@ -292,6 +297,10 @@ void Run()
                 t_snd1 = esp_timer_get_time();
                 s_sound_turbo = Frame::TurboMode();
                 xSemaphoreGive(s_sound_start);
+                // Write previous frame to I2S — blocks ~20ms on DMA.
+                // Core 0 already synthesising next frame in parallel.
+                if (!s_sound_turbo)
+                    Sound::FlushAudio();
             }
             t2d = esp_timer_get_time();
 

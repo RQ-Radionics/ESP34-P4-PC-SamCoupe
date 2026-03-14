@@ -31,6 +31,7 @@
 #include "WAV.h"
 
 static uint8_t* pbSampleBuffer;
+static int s_pending_size = 0;  // bytes ready to write to I2S (set by FrameUpdate, cleared by FlushAudio)
 
 static void MixAudio(uint8_t* pDst_, const uint8_t* pSrc_, int nLen_);
 static int AdjustSpeed(uint8_t* pb_, int nSize_, int nSpeed_);
@@ -89,33 +90,28 @@ void Sound::FrameUpdate()
     AVI::AddFrame(pbSampleBuffer, nSize);
 
     if (SAMPLE_BITS == 16 && SAMPLE_CHANNELS == 2)
-        nSize = AdjustSpeed(pbSampleBuffer, nSize, GetOption(speed));
+        s_pending_size = AdjustSpeed(pbSampleBuffer, nSize, GetOption(speed));
+    else
+        s_pending_size = nSize;
 
-    auto buffer_level = Audio::AddData(pbSampleBuffer, nSize);
+    // Audio write is deferred to FlushAudio() called from Core 1,
+    // so Core 0 can start synthesising the next frame in parallel.
 
 #ifndef ESP_PLATFORM
-    // On desktop, use sleep_until to pace the emulation when audiosync is off.
-    // On ESP32 the I2S DMA write (portMAX_DELAY) already acts as the master
-    // clock — sleep_until uses vTaskDelay (10 ms tick resolution) and causes
-    // regular vibrato artefacts in the audio output.
-    using namespace std::chrono;
-    static high_resolution_clock::time_point frame_time;
-    auto one_frame = duration_cast<microseconds>(
-        seconds(1) / ACTUAL_FRAMES_PER_SECOND * 100.0f / GetOption(speed));
-
-    auto now = high_resolution_clock::now();
-    if (now - frame_time > one_frame * 2)
-    {
-        frame_time = now;
-    }
-    else if (!GetOption(audiosync) && GetOption(speed) == 100)
-    {
-        auto max_adjust = 0.01f;
-        auto scale = (1.0f - max_adjust) + 2.0f * max_adjust * buffer_level;
-        frame_time += duration_cast<microseconds>(one_frame * scale);
-        std::this_thread::sleep_until(frame_time);
-    }
+    // On desktop: call FlushAudio() immediately (single-threaded).
+    FlushAudio();
 #endif
+}
+
+// Flush the last synthesised frame to I2S. Blocks on DMA (~20ms).
+// Called from Core 1 (CPU.cpp) after taking s_sound_done.
+void Sound::FlushAudio()
+{
+    if (s_pending_size <= 0 || !pbSampleBuffer)
+        return;
+
+    Audio::AddData(pbSampleBuffer, s_pending_size);
+    s_pending_size = 0;
 }
 
 ////////////////////////////////////////////////////////////////////////////////

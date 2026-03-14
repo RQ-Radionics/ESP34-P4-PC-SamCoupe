@@ -37,7 +37,15 @@ class Sound
 public:
     static bool Init();
     static void Exit();
+
+    // FrameUpdate: synthesise + mix into pbSampleBuffer. Does NOT write to I2S.
+    // Call from Core 0 (sound_task).
     static void FrameUpdate();
+
+    // FlushAudio: write the last FrameUpdate buffer to I2S (blocks on DMA).
+    // Call from Core 1 AFTER taking s_sound_done, so Core 0 can synthesise
+    // the next frame in parallel while Core 1 is blocked writing this one.
+    static void FlushAudio();
 };
 
 class SoundDevice : public IoDevice
