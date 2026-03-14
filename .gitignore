@@ -11,3 +11,6 @@ managed_components/
 # Editor
 .cache/
 .claude/
+
+# Local scripts
+run.sh
