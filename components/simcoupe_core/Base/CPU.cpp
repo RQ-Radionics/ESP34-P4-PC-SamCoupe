@@ -263,6 +263,13 @@ void Run()
         if (g_fPaused)
             continue;
 
+        // FlushAudio at the START of the frame — blocks on I2S DMA until
+        // exactly 441 samples are consumed at 22050Hz = 20.000ms per frame.
+        // This is the master clock: crystal-accurate, not CPU-load dependent.
+        // Core 0 is already synthesising the next frame in parallel.
+        if (s_sound_start && !s_sound_turbo)
+            Sound::FlushAudio();
+
         int64_t t0 = esp_timer_get_time();
         if (!Debug::IsActive() && !GUI::IsModal())
             ExecuteChunk();
@@ -297,10 +304,8 @@ void Run()
                 t_snd1 = esp_timer_get_time();
                 s_sound_turbo = Frame::TurboMode();
                 xSemaphoreGive(s_sound_start);
-                // Write previous frame to I2S — blocks ~20ms on DMA.
-                // Core 0 already synthesising next frame in parallel.
-                if (!s_sound_turbo)
-                    Sound::FlushAudio();
+                // FlushAudio moved to start of next frame iteration —
+                // keeps I2S as master clock without blocking video pipeline.
             }
             t2d = esp_timer_get_time();
 
