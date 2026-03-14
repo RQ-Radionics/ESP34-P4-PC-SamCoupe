@@ -229,10 +229,18 @@ void ESP32Video::Update(const FrameBuffer& fb)
     // Distinguish by height: GUI (pGuiScreen) is always taller than SAM_MAX_H.
     const bool is_gui = (src_h > SAM_MAX_H);
 
-    // Dynamic offsets based on actual framebuffer size.
-    const int off_x = (DST_W - src_w) / 2;                // 48 for 544, 40 for 560
-    const int off_y = is_gui ? (DST_H - src_h) / 2        // GUI: 1×V centering
-                             : (DST_H - src_h * 2) / 2;   // normal: 2×V centering
+    // Dynamic offsets — clamped to 0 so we never write outside the framebuffer.
+    // If src_w > DST_W or src_h*2 > DST_H the image is cropped symmetrically.
+    const int off_x = std::max(0, (DST_W - src_w) / 2);
+    const int off_y = is_gui ? std::max(0, (DST_H - src_h) / 2)
+                             : std::max(0, (DST_H - src_h * 2) / 2);
+    // Number of source rows/cols that actually fit on screen
+    const int vis_w = std::min(src_w, DST_W - off_x);
+    const int vis_h = is_gui ? std::min(src_h, DST_H - off_y)
+                             : std::min(src_h, (DST_H - off_y) / 2);
+    // First source row to render (crop top if off_y==0 and image overflows)
+    const int src_y0 = is_gui ? std::max(0, (src_h - DST_H) / 2)
+                              : std::max(0, (src_h - DST_H / 2) / 2);
 
     // Detect GUI→normal transition.
     if (!is_gui && m_was_gui) {
@@ -278,7 +286,7 @@ void ESP32Video::Update(const FrameBuffer& fb)
         int first_dirty = -1;
         int last_dirty  = -1;
 
-        for (int sy = 0; sy < src_h; ++sy)
+        for (int sy = src_y0; sy < src_y0 + vis_h; ++sy)
         {
             const uint8_t* src_line = fb.GetLine(sy);
             uint8_t* prev_line = m_prev + sy * src_w;
@@ -291,7 +299,7 @@ void ESP32Video::Update(const FrameBuffer& fb)
             // Expand 1×H into active area of m_row_buf (borders stay black)
             if (vdiag) s_expand_us -= esp_timer_get_time();
             uint8_t* p = m_row_buf + off_x * 3;
-            for (int sx = 0; sx < src_w; ++sx)
+            for (int sx = 0; sx < vis_w; ++sx)
             {
                 const PaletteEntry& e = m_palette[src_line[sx] & 0x7F];
                 *p++ = e.r; *p++ = e.g; *p++ = e.b;
@@ -300,7 +308,7 @@ void ESP32Video::Update(const FrameBuffer& fb)
 
             // Copy 2×V into both framebuffers
             if (vdiag) s_copy_us -= esp_timer_get_time();
-            int dy0 = off_y + sy * 2;
+            int dy0 = off_y + (sy - src_y0) * 2;
             memcpy(dst + dy0       * DST_STRIDE, m_row_buf, DST_STRIDE);
             memcpy(dst + (dy0 + 1) * DST_STRIDE, m_row_buf, DST_STRIDE);
             if (other) {
@@ -316,8 +324,8 @@ void ESP32Video::Update(const FrameBuffer& fb)
         if (vdiag) vt1 = esp_timer_get_time();
         if (first_dirty >= 0)
         {
-            int disp_first = off_y + first_dirty * 2;
-            int disp_last  = off_y + last_dirty  * 2 + 2;
+            int disp_first = off_y + (first_dirty - src_y0) * 2;
+            int disp_last  = off_y + (last_dirty  - src_y0) * 2 + 2;
             size_t flush_bytes = (size_t)(disp_last - disp_first) * DST_STRIDE;
 
             static uint32_t s_vid_frame = 0; s_vid_frame++;
