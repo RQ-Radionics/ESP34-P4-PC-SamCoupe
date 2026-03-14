@@ -229,19 +229,11 @@ void ESP32Video::Update(const FrameBuffer& fb)
 
     // Detect GUI→normal transition.
     if (!is_gui && m_was_gui) {
-        // Clear BOTH framebuffers completely to black. This runs before the
-        // game blit below, so the game content is written on top immediately
-        // in the same frame — no visible flash. The m_row_buf borders are
-        // pre-zeroed, so left/right border columns stay black permanently.
-        void* fb0 = nullptr;
-        void* fb1 = nullptr;
-        sim_display_get_framebuffer(&fb0, &fb1);
-        const size_t fb_size = DST_W * DST_H * 3;
-        if (fb0) memset(fb0, 0, fb_size);
-        if (fb1) memset(fb1, 0, fb_size);
-        // Invalidate m_prev so all 192 SAM lines are repainted this frame.
+        // Invalidate m_prev → forces full repaint of all 192 SAM lines.
+        // Set m_clear_borders=2 so the game blit writes to BOTH FBs for
+        // the next 2 frames, overwriting OSD pixels in whichever FB is back.
         memset(m_prev, 0xFF, sizeof(m_prev));
-        m_clear_borders = 0;
+        m_clear_borders = 2;
     }
     m_was_gui = is_gui;
 
@@ -334,6 +326,31 @@ void ESP32Video::Update(const FrameBuffer& fb)
                 sim_display_flush_region((size_t)disp_first * DST_STRIDE, flush_bytes);
             }
         }
+        // On OSD exit: clean border pixels left by OSD in both FBs.
+        // We write to `dst` (back buffer) each frame. Over 2 frames both FBs
+        // get cleaned as the double buffer alternates.
+        if (m_clear_borders > 0) {
+            --m_clear_borders;
+            // Clear all rows that the game never writes (top + bottom borders)
+            // and the left/right border columns are already black in m_row_buf
+            // but OSD may have written there — zero those rows fully.
+            const size_t top_bytes = (size_t)OFF_Y * DST_STRIDE;
+            const size_t bot_off   = (size_t)(OFF_Y + SAM_H * 2) * DST_STRIDE;
+            const size_t bot_bytes = (size_t)DST_H * DST_STRIDE - bot_off;
+            memset(dst,            0, top_bytes);
+            memset(dst + bot_off,  0, bot_bytes);
+            // Also zero left and right border columns within game rows
+            for (int row = OFF_Y; row < OFF_Y + SAM_H * 2; ++row) {
+                memset(dst + row * DST_STRIDE,                           0, OFF_X * 3);
+                memset(dst + row * DST_STRIDE + (OFF_X + SAM_W) * 3,    0, (DST_W - OFF_X - SAM_W) * 3);
+            }
+            // Single msync for the whole FB
+            esp_cache_msync(dst, (size_t)DST_W * DST_H * 3,
+                            ESP_CACHE_MSYNC_FLAG_DIR_C2M |
+                            ESP_CACHE_MSYNC_FLAG_TYPE_DATA |
+                            ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+        }
+
         // Swap once per frame — present back buffer regardless of dirty count.
         sim_display_swap();
         if (vdiag) {
