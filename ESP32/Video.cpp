@@ -236,14 +236,16 @@ void ESP32Video::Update(const FrameBuffer& fb)
 
     if (is_gui)
     {
-        // GUI: 512×384 → 1×H 1×V → 512×384, centred in 640×480 (OFF_X=64, OFF_Y=48).
-        // Source rows map 1:1 to display rows — no scaling needed.
-        const int rows = (src_h <= DST_H - OFF_Y) ? src_h : DST_H - OFF_Y;
+        // GUI: src_w x src_h -> 1xH 1xV, centred in 640x480.
+        // src_w may be 560 (wider than SAM_W=512) to fit FileDialog (527px wide).
+        const int gui_off_x = (src_w < DST_W) ? (DST_W - src_w) / 2 : 0;
+        const int gui_w     = (src_w <= DST_W) ? src_w : DST_W;
+        const int rows      = (src_h <= DST_H - OFF_Y) ? src_h : DST_H - OFF_Y;
         for (int sy = 0; sy < rows; ++sy)
         {
             const uint8_t* src_line = fb.GetLine(sy);
-            uint8_t* p = m_row_buf + OFF_X * 3;
-            for (int sx = 0; sx < src_w; ++sx) {
+            uint8_t* p = m_row_buf + gui_off_x * 3;
+            for (int sx = 0; sx < gui_w; ++sx) {
                 const PaletteEntry& e = m_palette[src_line[sx] & 0x7F];
                 *p++ = e.r; *p++ = e.g; *p++ = e.b;
             }
