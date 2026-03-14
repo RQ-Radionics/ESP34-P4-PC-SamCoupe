@@ -264,14 +264,6 @@ void Run()
         if (g_fPaused)
             continue;
 
-        // Crystal-accurate 50fps throttle + audio write:
-        //   1. wait_frame_done: blocks until ISR fires (= 20ms DMA interval)
-        //   2. FlushAudio: writes synthesised samples to I2S DMA
-        if (s_sound_start && !s_sound_turbo) {
-            sim_audio_wait_frame_done(portMAX_DELAY);
-            Sound::FlushAudio();
-        }
-
         int64_t t0 = esp_timer_get_time();
         if (!Debug::IsActive() && !GUI::IsModal())
             ExecuteChunk();
@@ -285,20 +277,20 @@ void Run()
         {
             EventFrameEnd(CPU_CYCLES_PER_FRAME);
             t2b = esp_timer_get_time();
-            IO::FrameUpdate();   // no longer calls Sound::FrameUpdate()
+            IO::FrameUpdate();
             t2c = esp_timer_get_time();
             Debug::FrameEnd();
             Frame::Flyback();
-            t2d = esp_timer_get_time();
             CPU::frame_cycles %= CPU_CYCLES_PER_FRAME;
 
-            // Pipeline (Core 1):
-            //   1. take s_sound_done  — wait for Core 0 synthesis to finish
-            //   2. give s_sound_start — Core 0 starts synthesising NEXT frame
-            //   3. FlushAudio()       — Core 1 writes THIS frame to I2S (~20ms)
+            // Correct audio pipeline:
+            //   1. take s_sound_done  — wait for Core 0 FrameUpdate(N-1) done
+            //   2. give s_sound_start — Core 0 starts FrameUpdate(N) — no race:
+            //                           Z80 for frame N is already done above
+            //   3. wait_frame_done()  — crystal-accurate 50fps throttle (ISR)
+            //   4. FlushAudio(N-1)    — write previous frame to I2S DMA
             //
-            // Core 0 synthesises next frame IN PARALLEL with Core 1's I2S write.
-            // snd_wait should drop to ~0 (synthesis << 20ms write).
+            // Core 0 synthesises frame N IN PARALLEL with Core 1's I2S write.
             int64_t t_snd0 = 0, t_snd1 = 0;
             if (s_sound_start) {
                 t_snd0 = esp_timer_get_time();
@@ -306,8 +298,10 @@ void Run()
                 t_snd1 = esp_timer_get_time();
                 s_sound_turbo = Frame::TurboMode();
                 xSemaphoreGive(s_sound_start);
-                // FlushAudio moved to start of next frame iteration —
-                // keeps I2S as master clock without blocking video pipeline.
+                if (!s_sound_turbo) {
+                    sim_audio_wait_frame_done(portMAX_DELAY);
+                    Sound::FlushAudio();
+                }
             }
             t2d = esp_timer_get_time();
 
