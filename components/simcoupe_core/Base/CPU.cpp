@@ -264,11 +264,13 @@ void Run()
         if (g_fPaused)
             continue;
 
-        // Wait for I2S DMA on_sent callback — fires exactly once per 441 samples
-        // = once per 20.000ms at 22050Hz. Crystal-accurate 50fps master clock.
-        // Core 0 is already synthesising the next frame in parallel.
-        if (s_sound_start && !s_sound_turbo)
+        // Crystal-accurate 50fps throttle + audio write:
+        //   1. wait_frame_done: blocks until ISR fires (= 20ms DMA interval)
+        //   2. FlushAudio: writes synthesised samples to I2S DMA
+        if (s_sound_start && !s_sound_turbo) {
             sim_audio_wait_frame_done(portMAX_DELAY);
+            Sound::FlushAudio();
+        }
 
         int64_t t0 = esp_timer_get_time();
         if (!Debug::IsActive() && !GUI::IsModal())
