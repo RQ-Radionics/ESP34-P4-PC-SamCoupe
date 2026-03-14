@@ -1,12 +1,17 @@
 /*
  * esp_lcd_lt8912b.c — Lontium LT8912B MIPI DSI → HDMI bridge driver
  *
- * Adapted from esp32-mos for SimCoupe: uses CONFIG_SIM_DISPLAY_* Kconfig symbols.
- *
+ * Adapted from esp32-mos reference (proven working on Olimex ESP32-P4-PC).
  * All timing parameters come from Kconfig (single source of truth):
  *   CONFIG_SIM_DISPLAY_HACT/VACT, PCLK_MHZ, HS/HFP/HBP, VS/VFP/VBP,
  *   HSYNC_POL/VSYNC_POL, SETTLE, DDS_0/1/2, DSI_LANE_MBPS.
- * Board-specific values live in sdkconfig.defaults.olimex-p4pc.
+ * Board-specific values live in sdkconfig.defaults.
+ *
+ * Current configuration (1024×768@60Hz):
+ *   hact=1024  htotal=1220  hfp=48  hs=8   hbp=140
+ *   vact=768   vtotal=819   vfp=3   vs=6   vbp=42
+ *   pclk=60 MHz, hsync=+, vsync=-
+ *   DDS=0x93/0x3E/0x29, lane=896 Mbps
  *
  * LT8912B I2C sub-addresses (all on the same bus):
  *   0x48 — main  (digital/analog init, HPD status, output path)
@@ -73,97 +78,74 @@ static esp_err_t lt_read(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t *val)
 }
 
 /* ------------------------------------------------------------------ */
-/* Register sequences                                                   */
+/* Register sequences (from esp32-mos reference, proven on hardware)   */
 /* ------------------------------------------------------------------ */
-/* Digital clock enable — matches production test cmd_digital_clock_en[] exactly.
- * Note: NO 0x02=0xFF release here; the production test starts with 0x02=0xf7 only. */
-static esp_err_t lt8912b_write_digital_clock_en(void)
+
+/* Step 1: Digital clock enable + analog power-up (ADDR_MAIN = 0x48).
+ * LVDS PLL reset pulse first (0x02 F7→FF), then clock enables.
+ * 0x33 here is Tx drive strength (0x0C), NOT the HDMI output enable.
+ * HDMI output is enabled separately at end of init (0x33=0x0E). */
+static esp_err_t lt8912b_write_init_config(void)
 {
     i2c_master_dev_handle_t m = s_lt.dev_main;
 
-    ESP_RETURN_ON_ERROR(lt_write(m, 0x02, 0xF7), TAG, "clk 0x02");
-    ESP_RETURN_ON_ERROR(lt_write(m, 0x08, 0xFF), TAG, "clk 0x08");
-    ESP_RETURN_ON_ERROR(lt_write(m, 0x09, 0xFF), TAG, "clk 0x09");
-    ESP_RETURN_ON_ERROR(lt_write(m, 0x0A, 0xFF), TAG, "clk 0x0A");
-    ESP_RETURN_ON_ERROR(lt_write(m, 0x0B, 0x7C), TAG, "clk 0x0B");
-    ESP_RETURN_ON_ERROR(lt_write(m, 0x0C, 0xFF), TAG, "clk 0x0C");
+    /* LVDS PLL reset pulse — must be first */
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x02, 0xF7), TAG, "init 0x02 hold");
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x02, 0xFF), TAG, "init 0x02 release");
+
+    /* Digital clock enable */
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x08, 0xFF), TAG, "init 0x08");
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x09, 0xFF), TAG, "init 0x09");
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x0A, 0xFF), TAG, "init 0x0A");
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x0B, 0x7C), TAG, "init 0x0B");
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x0C, 0xFF), TAG, "init 0x0C");
+
+    /* Tx Analog — high drive for >= 530 Mbps lane rate */
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x31, 0xE1), TAG, "init 0x31");
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x32, 0xE1), TAG, "init 0x32");
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x33, 0x0C), TAG, "init 0x33 drive");
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x37, 0x00), TAG, "init 0x37");
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x38, 0x22), TAG, "init 0x38");
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x60, 0x82), TAG, "init 0x60");
+
+    /* Cbus Analog */
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x39, 0x45), TAG, "init 0x39");
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x3A, 0x00), TAG, "init 0x3A");
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x3B, 0x00), TAG, "init 0x3B");
+
+    /* HDMI PLL Analog */
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x44, 0x31), TAG, "init 0x44");
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x55, 0x44), TAG, "init 0x55");
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x57, 0x01), TAG, "init 0x57");
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x5A, 0x02), TAG, "init 0x5A");
+
+    /* MIPI Analog (no P/N swap) */
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x3E, 0xD6), TAG, "init 0x3E");
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x3F, 0xD4), TAG, "init 0x3F");
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x41, 0x3C), TAG, "init 0x41");
 
     return ESP_OK;
 }
 
-/* Tx Analog — matches production test cmd_tx_analog[] exactly */
-static esp_err_t lt8912b_write_tx_analog(void)
-{
-    i2c_master_dev_handle_t m = s_lt.dev_main;
-
-    ESP_RETURN_ON_ERROR(lt_write(m, 0x31, 0xE1), TAG, "tx 0x31");
-    ESP_RETURN_ON_ERROR(lt_write(m, 0x32, 0xE1), TAG, "tx 0x32");
-    ESP_RETURN_ON_ERROR(lt_write(m, 0x33, 0x0C), TAG, "tx 0x33");
-    ESP_RETURN_ON_ERROR(lt_write(m, 0x37, 0x00), TAG, "tx 0x37");
-    ESP_RETURN_ON_ERROR(lt_write(m, 0x38, 0x22), TAG, "tx 0x38");
-    ESP_RETURN_ON_ERROR(lt_write(m, 0x60, 0x82), TAG, "tx 0x60");
-
-    return ESP_OK;
-}
-
-/* Cbus Analog — matches production test cmd_cbus_analog[] exactly */
-static esp_err_t lt8912b_write_cbus_analog(void)
-{
-    i2c_master_dev_handle_t m = s_lt.dev_main;
-
-    ESP_RETURN_ON_ERROR(lt_write(m, 0x39, 0x45), TAG, "cbus 0x39");
-    ESP_RETURN_ON_ERROR(lt_write(m, 0x3A, 0x00), TAG, "cbus 0x3A");
-    ESP_RETURN_ON_ERROR(lt_write(m, 0x3B, 0x00), TAG, "cbus 0x3B");
-
-    return ESP_OK;
-}
-
-/* HDMI PLL Analog — matches production test cmd_hdmi_pll_analog[] exactly */
-static esp_err_t lt8912b_write_hdmi_pll_analog(void)
-{
-    i2c_master_dev_handle_t m = s_lt.dev_main;
-
-    ESP_RETURN_ON_ERROR(lt_write(m, 0x44, 0x31), TAG, "pll 0x44");
-    ESP_RETURN_ON_ERROR(lt_write(m, 0x55, 0x44), TAG, "pll 0x55");
-    ESP_RETURN_ON_ERROR(lt_write(m, 0x57, 0x01), TAG, "pll 0x57");
-    ESP_RETURN_ON_ERROR(lt_write(m, 0x5A, 0x02), TAG, "pll 0x5A");
-
-    return ESP_OK;
-}
-
-/* MIPI Analog (P/N swap=false) — matches _panel_lt8912b_send_mipi_analog(false) */
-static esp_err_t lt8912b_write_mipi_analog(void)
-{
-    i2c_master_dev_handle_t m = s_lt.dev_main;
-
-    ESP_RETURN_ON_ERROR(lt_write(m, 0x3E, 0xD6), TAG, "mana 0x3E"); /* no P/N swap */
-    ESP_RETURN_ON_ERROR(lt_write(m, 0x3F, 0xD4), TAG, "mana 0x3F");
-    ESP_RETURN_ON_ERROR(lt_write(m, 0x41, 0x3C), TAG, "mana 0x41");
-
-    return ESP_OK;
-}
-
-/* MIPI Basic Set (2 lanes, no swap) — matches _panel_lt8912b_send_mipi_basic_set(2, false).
- * Note: 0x12 (trail) is commented out in the production test — we omit it too. */
+/* Step 2: MIPI DSI basic config — 2 lanes (ADDR_CEC_DSI = 0x49).
+ * 0x12=0x04 (trail) is included — required by esp32-mos reference. */
 static esp_err_t lt8912b_write_mipi_basic(void)
 {
     i2c_master_dev_handle_t d = s_lt.dev_cec_dsi;
 
-    ESP_RETURN_ON_ERROR(lt_write(d, 0x10, 0x01), TAG, "mipi 0x10"); /* term en */
-    ESP_RETURN_ON_ERROR(lt_write(d, 0x11, CONFIG_SIM_DISPLAY_SETTLE), TAG, "mipi settle");
-    /* 0x12 trail — commented out in production test, omitted */
-    ESP_RETURN_ON_ERROR(lt_write(d, 0x13, 0x02), TAG, "mipi 0x13"); /* 2 lanes */
-    ESP_RETURN_ON_ERROR(lt_write(d, 0x14, 0x00), TAG, "mipi 0x14"); /* debug mux */
-    ESP_RETURN_ON_ERROR(lt_write(d, 0x15, 0x00), TAG, "mipi 0x15"); /* no lane swap */
-    ESP_RETURN_ON_ERROR(lt_write(d, 0x1A, 0x03), TAG, "mipi 0x1A"); /* hshift 3 */
-    ESP_RETURN_ON_ERROR(lt_write(d, 0x1B, 0x03), TAG, "mipi 0x1B"); /* vshift 3 */
+    ESP_RETURN_ON_ERROR(lt_write(d, 0x10, 0x01), TAG, "mipi 0x10 term_en");
+    ESP_RETURN_ON_ERROR(lt_write(d, 0x11, CONFIG_SIM_DISPLAY_SETTLE), TAG, "mipi 0x11 settle");
+    ESP_RETURN_ON_ERROR(lt_write(d, 0x12, 0x04), TAG, "mipi 0x12 trail");
+    ESP_RETURN_ON_ERROR(lt_write(d, 0x13, 0x02), TAG, "mipi 0x13 2lanes");
+    ESP_RETURN_ON_ERROR(lt_write(d, 0x14, 0x00), TAG, "mipi 0x14");
+    ESP_RETURN_ON_ERROR(lt_write(d, 0x15, 0x00), TAG, "mipi 0x15 no_swap");
+    ESP_RETURN_ON_ERROR(lt_write(d, 0x1A, 0x03), TAG, "mipi 0x1A hshift");
+    ESP_RETURN_ON_ERROR(lt_write(d, 0x1B, 0x03), TAG, "mipi 0x1B vshift");
 
     return ESP_OK;
 }
 
-/* Video timing — matches _panel_lt8912b_send_video_setup() exactly.
- * sync polarity (0xAB) is NOT written here; it goes in write_avi_infoframe()
- * exactly as the production test does in _panel_lt8912b_send_avi_infoframe(). */
+/* Step 3: Video timing (ADDR_CEC_DSI = 0x49) + sync polarity (ADDR_MAIN 0xAB) */
 static esp_err_t lt8912b_write_video_timing(void)
 {
     i2c_master_dev_handle_t d = s_lt.dev_cec_dsi;
@@ -193,42 +175,18 @@ static esp_err_t lt8912b_write_video_timing(void)
     ESP_RETURN_ON_ERROR(lt_write(d, 0x3E, CONFIG_SIM_DISPLAY_HFP & 0xFF),  TAG, "vt hfp_l");
     ESP_RETURN_ON_ERROR(lt_write(d, 0x3F, CONFIG_SIM_DISPLAY_HFP >> 8),    TAG, "vt hfp_h");
 
+    /* Sync polarity on ADDR_MAIN: bit0=vsync, bit1=hsync (1=positive) */
+    uint8_t sync_pol = (CONFIG_SIM_DISPLAY_VSYNC_POL & 1) |
+                       ((CONFIG_SIM_DISPLAY_HSYNC_POL & 1) << 1);
+    ESP_RETURN_ON_ERROR(lt_write(s_lt.dev_main, 0xAB, sync_pol), TAG, "vt sync_pol");
+
 #undef HTOTAL
 #undef VTOTAL
 
     return ESP_OK;
 }
 
-/* AVI Infoframe — matches _panel_lt8912b_send_avi_infoframe() exactly.
- * vic=0, aspect_ratio=2 (16:9), hsync_pol=CONFIG, vsync_pol=CONFIG.
- * This also writes sync polarity to 0xAB on dev_main. */
-static esp_err_t lt8912b_write_avi_infoframe(void)
-{
-    i2c_master_dev_handle_t m = s_lt.dev_main;
-    i2c_master_dev_handle_t a = s_lt.dev_audio; /* 0x4A — AVI infoframe device */
-
-    /* enable null package */
-    ESP_RETURN_ON_ERROR(lt_write(a, 0x3C, 0x41), TAG, "avi null_pkg");
-
-    /* sync_polarity: bit0=vsync, bit1=hsync */
-    uint8_t sync_pol = (CONFIG_SIM_DISPLAY_VSYNC_POL & 1) |
-                       ((CONFIG_SIM_DISPLAY_HSYNC_POL & 1) << 1);
-    /* aspect_ratio=2 (16:9), vic=0 */
-    uint8_t pb2 = (2 << 4) + 0x08;
-    uint8_t pb4 = 0; /* vic=0 */
-    uint8_t pb0 = (((pb2 + pb4) <= 0x5F) ? (0x5F - pb2 - pb4) : (0x15F - pb2 - pb4));
-
-    ESP_RETURN_ON_ERROR(lt_write(m, 0xAB, sync_pol), TAG, "avi sync_pol");
-    ESP_RETURN_ON_ERROR(lt_write(a, 0x43, pb0),      TAG, "avi pb0 checksum");
-    ESP_RETURN_ON_ERROR(lt_write(a, 0x44, 0x10),     TAG, "avi pb1 RGB888");
-    ESP_RETURN_ON_ERROR(lt_write(a, 0x45, pb2),      TAG, "avi pb2 aspect");
-    ESP_RETURN_ON_ERROR(lt_write(a, 0x46, 0x00),     TAG, "avi pb3");
-    ESP_RETURN_ON_ERROR(lt_write(a, 0x47, pb4),      TAG, "avi pb4 vic");
-
-    return ESP_OK;
-}
-
-/* DDS Config — matches production test cmd_dds_config[] exactly, same register order. */
+/* Step 4: DDS configuration (ADDR_CEC_DSI = 0x49) */
 static esp_err_t lt8912b_write_dds_config(void)
 {
     i2c_master_dev_handle_t d = s_lt.dev_cec_dsi;
@@ -237,7 +195,7 @@ static esp_err_t lt8912b_write_dds_config(void)
     ESP_RETURN_ON_ERROR(lt_write(d, 0x4F, CONFIG_SIM_DISPLAY_DDS_1), TAG, "dds 4F");
     ESP_RETURN_ON_ERROR(lt_write(d, 0x50, CONFIG_SIM_DISPLAY_DDS_2), TAG, "dds 50");
     ESP_RETURN_ON_ERROR(lt_write(d, 0x51, 0x80), TAG, "dds 51 arm");
-    ESP_RETURN_ON_ERROR(lt_write(d, 0x1E, 0x4F), TAG, "dds 1E"); /* position 5, same as prod test */
+
     ESP_RETURN_ON_ERROR(lt_write(d, 0x1F, 0x5E), TAG, "dds 1F");
     ESP_RETURN_ON_ERROR(lt_write(d, 0x20, 0x01), TAG, "dds 20");
     ESP_RETURN_ON_ERROR(lt_write(d, 0x21, 0x2C), TAG, "dds 21");
@@ -277,11 +235,17 @@ static esp_err_t lt8912b_write_dds_config(void)
     ESP_RETURN_ON_ERROR(lt_write(d, 0x5A, 0x8A), TAG, "dds 5A");
     ESP_RETURN_ON_ERROR(lt_write(d, 0x5B, 0x00), TAG, "dds 5B");
     ESP_RETURN_ON_ERROR(lt_write(d, 0x5C, 0x34), TAG, "dds 5C");
+
+    /* h_v_d_pol_hdmi_sel_pll_sel — before DDS commit */
+    ESP_RETURN_ON_ERROR(lt_write(d, 0x1E, 0x4F), TAG, "dds 1E");
+
+    /* Commit */
     ESP_RETURN_ON_ERROR(lt_write(d, 0x51, 0x00), TAG, "dds 51 commit");
 
     return ESP_OK;
 }
 
+/* Step 5: MIPI RX logic reset + DDS reset (ADDR_MAIN = 0x48) */
 static esp_err_t lt8912b_write_rxlogicres(void)
 {
     i2c_master_dev_handle_t m = s_lt.dev_main;
@@ -289,6 +253,7 @@ static esp_err_t lt8912b_write_rxlogicres(void)
     ESP_RETURN_ON_ERROR(lt_write(m, 0x03, 0x7F), TAG, "rxres hold");
     vTaskDelay(pdMS_TO_TICKS(10));
     ESP_RETURN_ON_ERROR(lt_write(m, 0x03, 0xFF), TAG, "rxres release");
+
     ESP_RETURN_ON_ERROR(lt_write(m, 0x05, 0xFB), TAG, "dds_rst hold");
     vTaskDelay(pdMS_TO_TICKS(10));
     ESP_RETURN_ON_ERROR(lt_write(m, 0x05, 0xFF), TAG, "dds_rst release");
@@ -296,8 +261,9 @@ static esp_err_t lt8912b_write_rxlogicres(void)
     return ESP_OK;
 }
 
-/* LVDS Bypass — matches production test cmd_lvds[] exactly.
- * No extra 0x02/0x03 resets at the end (those are NOT in the production test). */
+/* Step 6: LVDS bypass + output path + PLL resets (ADDR_MAIN = 0x48).
+ * Required even for HDMI-only output. Includes HDMI/DVI mode selection
+ * and both LVDS PLL and MIPI RX reset pulses at the end. */
 static esp_err_t lt8912b_write_lvds_config(void)
 {
     i2c_master_dev_handle_t m = s_lt.dev_main;
@@ -312,10 +278,24 @@ static esp_err_t lt8912b_write_lvds_config(void)
     ESP_RETURN_ON_ERROR(lt_write(m, 0x6A, 0x00), TAG, "lvds 6A");
     ESP_RETURN_ON_ERROR(lt_write(m, 0x6C, 0xB8), TAG, "lvds 6C");
     ESP_RETURN_ON_ERROR(lt_write(m, 0x6B, 0x51), TAG, "lvds 6B");
+
+    /* Core PLL reset pulse */
     ESP_RETURN_ON_ERROR(lt_write(m, 0x04, 0xFB), TAG, "pll_rst hold");
     ESP_RETURN_ON_ERROR(lt_write(m, 0x04, 0xFF), TAG, "pll_rst release");
+
     ESP_RETURN_ON_ERROR(lt_write(m, 0x7F, 0x00), TAG, "lvds 7F");
     ESP_RETURN_ON_ERROR(lt_write(m, 0xA8, 0x13), TAG, "lvds A8");
+
+    /* HDMI mode (audio info frame) */
+    ESP_RETURN_ON_ERROR(lt_write(m, 0xB2, 0x01), TAG, "lvds B2 hdmi_mode");
+
+    /* LVDS PLL reset pulse */
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x02, 0xF7), TAG, "lvds_pll hold");
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x02, 0xFF), TAG, "lvds_pll release");
+
+    /* MIPI RX reset pulse (second time — finalizes output path) */
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x03, 0xCF), TAG, "mipi_rx hold");
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x03, 0xFF), TAG, "mipi_rx release");
 
     return ESP_OK;
 }
@@ -356,18 +336,21 @@ static esp_err_t lt8912b_init_common(int hpd_gpio)
     }
     ESP_LOGI(TAG, "LT8912B detected (ID 0x%02X%02X)", id_h, id_l);
 
-    /* Phase 1 — before DPI enable (chip config, MIPI RX setup, DDS, video timing).
-     * Phase 2 (detect → video_timing×2 → avi → rxlogicres → audio → lvds → hdmi)
-     * runs in post_dpi_enable(), called AFTER esp_lcd_panel_init() starts the DPI
-     * stream — exactly as the production test does via panel_lt8912b_init() callback. */
-    ESP_GOTO_ON_ERROR(lt8912b_write_digital_clock_en(), err_devs, TAG, "digital_clock_en");
-    ESP_GOTO_ON_ERROR(lt8912b_write_tx_analog(),        err_devs, TAG, "tx_analog");
-    ESP_GOTO_ON_ERROR(lt8912b_write_cbus_analog(),      err_devs, TAG, "cbus_analog");
-    ESP_GOTO_ON_ERROR(lt8912b_write_hdmi_pll_analog(),  err_devs, TAG, "hdmi_pll_analog");
-    ESP_GOTO_ON_ERROR(lt8912b_write_mipi_analog(),      err_devs, TAG, "mipi_analog");
-    ESP_GOTO_ON_ERROR(lt8912b_write_mipi_basic(),       err_devs, TAG, "mipi_basic");
-    ESP_GOTO_ON_ERROR(lt8912b_write_dds_config(),       err_devs, TAG, "dds_config");
-    ESP_GOTO_ON_ERROR(lt8912b_write_video_timing(),     err_devs, TAG, "video_timing pre-DPI");
+    /* Full init sequence — matches esp32-mos reference exactly.
+     * All steps run BEFORE DPI enable. The DPI pixel stream starts after
+     * esp_lcd_panel_init() in sim_display.c; post_dpi_enable() then
+     * re-triggers rxlogicres and re-asserts hdmi_out_en with DSI live. */
+    ESP_GOTO_ON_ERROR(lt8912b_write_init_config(),  err_devs, TAG, "init_config");
+    ESP_GOTO_ON_ERROR(lt8912b_write_mipi_basic(),   err_devs, TAG, "mipi_basic");
+    ESP_GOTO_ON_ERROR(lt8912b_write_dds_config(),   err_devs, TAG, "dds_config");
+    ESP_GOTO_ON_ERROR(lt8912b_write_video_timing(), err_devs, TAG, "video_timing");
+    ESP_GOTO_ON_ERROR(lt8912b_write_rxlogicres(),   err_devs, TAG, "rxlogicres");
+    ESP_GOTO_ON_ERROR(lt8912b_write_lvds_config(),  err_devs, TAG, "lvds_config");
+
+    /* HDMI output enable — 0x33=0x0E enables TMDS output.
+     * (0x33 was set to 0x0C as Tx drive strength in init_config; now
+     * overwritten to enable the output.) */
+    ESP_GOTO_ON_ERROR(lt_write(s_lt.dev_main, 0x33, 0x0E), err_devs, TAG, "hdmi_out_en");
 
     s_lt.hpd_gpio = hpd_gpio;
     lt8912b_hpd_gpio_init(s_lt.hpd_gpio);
@@ -487,48 +470,58 @@ esp_err_t esp_lcd_lt8912b_post_dpi_enable(void)
 {
     if (!s_lt.initialized) return ESP_ERR_INVALID_STATE;
 
-    /* Phase 2 — runs AFTER esp_lcd_panel_init() has started the DPI pixel stream.
-     * Matches the second half of panel_lt8912b_init() in the production test,
-     * which is called as a callback from esp_lcd_panel_init() (DPI already active). */
+    i2c_master_dev_handle_t m = s_lt.dev_main;
 
-    /* detect_input_mipi: read MIPI sync counters to confirm DSI is active */
+    /* Read MIPI sync counters to confirm DSI is active after panel_init */
+    uint8_t hs_l = 0, hs_h = 0, vs_l = 0, vs_h = 0;
+    lt_read(m, 0x9C, &hs_l);
+    lt_read(m, 0x9D, &hs_h);
+    lt_read(m, 0x9E, &vs_l);
+    lt_read(m, 0x9F, &vs_h);
+    ESP_LOGI(TAG, "MIPI detect: Hsync=0x%02X%02X Vsync=0x%02X%02X%s",
+             hs_h, hs_l, vs_h, vs_l,
+             (hs_l || hs_h || vs_l || vs_h) ? " — DSI active" : " — NO DSI SIGNAL");
+
+    /* AVI InfoFrame — VIC=CONFIG_SIM_DISPLAY_VIC, RGB888, 16:9.
+     * Registers on ADDR_AUDIO (0x4A). Must be written before rxlogicres.
+     * pb0 = checksum = 0x5F - pb2 - pb4 (when sum <= 0x5F).
+     * pb1 = 0x10 (RGB, no overscan).
+     * pb2 = aspect ratio 16:9 (bit6:4=0x02) → 0x28.
+     * pb4 = VIC. */
     {
-        uint8_t hs_l = 0, hs_h = 0, vs_l = 0, vs_h = 0;
-        lt_read(s_lt.dev_main, 0x9C, &hs_l);
-        lt_read(s_lt.dev_main, 0x9D, &hs_h);
-        lt_read(s_lt.dev_main, 0x9E, &vs_l);
-        lt_read(s_lt.dev_main, 0x9F, &vs_h);
-        ESP_LOGI(TAG, "MIPI detect: Hsync=0x%02X%02X Vsync=0x%02X%02X%s",
-                 hs_h, hs_l, vs_h, vs_l,
-                 (hs_l || hs_h || vs_l || vs_h) ? " — DSI active" : " — NO DSI SIGNAL");
+        i2c_master_dev_handle_t a = s_lt.dev_audio;
+        uint8_t vic  = CONFIG_SIM_DISPLAY_VIC;
+        uint8_t pb2  = 0x28;  /* 16:9 active format */
+        uint8_t pb4  = vic;
+        uint8_t pb0  = (uint8_t)(0x5F - pb2 - pb4);
+        ESP_LOGI(TAG, "AVI InfoFrame: VIC=%d pb0=0x%02X pb2=0x%02X pb4=0x%02X", vic, pb0, pb2, pb4);
+        lt_write(a, 0x3C, 0x41);  /* enable null packet */
+        lt_write(a, 0x43, pb0);   /* checksum */
+        lt_write(a, 0x44, 0x10);  /* pb1: RGB, no overscan */
+        lt_write(a, 0x45, pb2);   /* pb2: 16:9 */
+        lt_write(a, 0x46, 0x00);  /* pb3 */
+        lt_write(a, 0x47, pb4);   /* pb4: VIC */
     }
 
-    ESP_RETURN_ON_ERROR(lt8912b_write_video_timing(),  TAG, "video_timing post-DPI");
-    ESP_RETURN_ON_ERROR(lt8912b_write_avi_infoframe(), TAG, "avi_infoframe");
-    ESP_RETURN_ON_ERROR(lt8912b_write_rxlogicres(),    TAG, "rxlogicres");
+    /* Re-trigger MIPI RX + DDS reset now that DSI stream is live */
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x03, 0x7F), TAG, "post rxres hold");
+    vTaskDelay(pdMS_TO_TICKS(10));
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x03, 0xFF), TAG, "post rxres release");
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x05, 0xFB), TAG, "post dds_rst hold");
+    vTaskDelay(pdMS_TO_TICKS(10));
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x05, 0xFF), TAG, "post dds_rst release");
 
-    /* Audio IIS Mode (HDMI=0x01) + Audio IIS En */
-    ESP_RETURN_ON_ERROR(lt_write(s_lt.dev_main,  0xB2, 0x01), TAG, "audio_iis_mode");
-    ESP_RETURN_ON_ERROR(lt_write(s_lt.dev_audio, 0x06, 0x08), TAG, "audio_iis_en 06");
-    ESP_RETURN_ON_ERROR(lt_write(s_lt.dev_audio, 0x07, 0xF0), TAG, "audio_iis_en 07");
-    ESP_RETURN_ON_ERROR(lt_write(s_lt.dev_audio, 0x34, 0xD2), TAG, "audio_iis_en 34");
-    ESP_RETURN_ON_ERROR(lt_write(s_lt.dev_audio, 0x0F, 0x2B), TAG, "audio_iis_en 0F");
+    /* Re-assert HDMI output enable */
+    ESP_RETURN_ON_ERROR(lt_write(m, 0x33, 0x0E), TAG, "post hdmi_out_en");
 
-    ESP_RETURN_ON_ERROR(lt8912b_write_lvds_config(),              TAG, "lvds_config");
-    ESP_RETURN_ON_ERROR(lt_write(s_lt.dev_main, 0x44, 0x31),     TAG, "lvds_disable");
-    ESP_RETURN_ON_ERROR(lt_write(s_lt.dev_main, 0x33, 0x0E),     TAG, "hdmi_out_en");
-
-    /* Read sync counters again to confirm lock after full init */
-    {
-        uint8_t hs_l = 0, hs_h = 0, vs_l = 0, vs_h = 0;
-        lt_read(s_lt.dev_main, 0x9C, &hs_l);
-        lt_read(s_lt.dev_main, 0x9D, &hs_h);
-        lt_read(s_lt.dev_main, 0x9E, &vs_l);
-        lt_read(s_lt.dev_main, 0x9F, &vs_h);
-        ESP_LOGI(TAG, "MIPI sync final: Hsync=0x%02X%02X Vsync=0x%02X%02X%s",
-                 hs_h, hs_l, vs_h, vs_l,
-                 (hs_l || hs_h || vs_l || vs_h) ? " — DSI locked" : " — NO DSI SIGNAL");
-    }
+    /* Confirm lock */
+    lt_read(m, 0x9C, &hs_l);
+    lt_read(m, 0x9D, &hs_h);
+    lt_read(m, 0x9E, &vs_l);
+    lt_read(m, 0x9F, &vs_h);
+    ESP_LOGI(TAG, "MIPI sync final: Hsync=0x%02X%02X Vsync=0x%02X%02X%s",
+             hs_h, hs_l, vs_h, vs_l,
+             (hs_l || hs_h || vs_l || vs_h) ? " — DSI locked" : " — NO DSI SIGNAL");
 
     return ESP_OK;
 }
@@ -545,3 +538,5 @@ void esp_lcd_lt8912b_deinit(void)
     memset(&s_lt, 0, sizeof(s_lt));
     ESP_LOGI(TAG, "LT8912B de-initialized");
 }
+
+/* esp_lcd_lt8912b_patch_dsi_eotp() is implemented in esp_lcd_lt8912b_eotp.c */

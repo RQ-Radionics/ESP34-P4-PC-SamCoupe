@@ -2,14 +2,14 @@
 //
 // Video.cpp: ESP32 video output via LT8912B HDMI bridge (sim_display component)
 //
-// Display: 1280×720 RGB888 (pclk=64MHz, 59.98Hz) — Olimex production timings.
+// Display: 1280×720 RGB888 (pclk=74MHz, 60Hz) — CEA-861 VIC=4 (720p).
 // SAM framebuffer: visiblearea=0 → 512×192 pixels, 1 byte/pixel (palette index).
 // Scaling: 2×H, 3×V → 1024×576, centred in 1280×720 (OFF_X=128, OFF_Y=72).
-// Aspect ratio preserved (4:3). Black borders on all four sides.
+// Aspect ratio: 4:3 pillarboxed inside 16:9. Black borders on all sides.
 //
 // DST_STRIDE = 1280×3 = 3840 bytes per display row.
 // m_row_buf holds one full display row (3840 bytes, DRAM):
-//   - left/right border pixels pre-zeroed (black) at Init()
+//   - border pixels pre-zeroed at Init() — stay black permanently
 //   - active area [OFF_X .. OFF_X+SCALED_W): each SAM pixel written 2×
 // Each dirty SAM row is expanded into m_row_buf then copied 3× into PSRAM.
 //
@@ -41,8 +41,8 @@ static constexpr int DST_STRIDE = DST_W * 3;   // 3840 bytes per row
 // SAM active area: 512×192 → 2×H 3×V → 1024×576, centred in 1280×720
 static constexpr int SAM_W      = 512;
 static constexpr int SAM_H      = 192;
-static constexpr int SCALED_W   = SAM_W * 2;   // 1024 (2× horizontal)
-static constexpr int SCALED_H   = SAM_H * 3;   // 576  (3× vertical)
+static constexpr int SCALED_W   = SAM_W * 2;   // 1024
+static constexpr int SCALED_H   = SAM_H * 3;   // 576
 static constexpr int OFF_X      = (DST_W - SCALED_W) / 2;  // 128
 static constexpr int OFF_Y      = (DST_H - SCALED_H) / 2;  // 72
 
@@ -66,9 +66,8 @@ private:
     PaletteEntry m_palette[128]{};
 
     // DRAM row buffer: one full display row (3840 bytes).
-    // Border pixels (left OFF_X and right OFF_X columns) are zeroed at Init()
-    // and never touched again — they stay black permanently.
-    // Active area [OFF_X*3 .. (OFF_X+SCALED_W)*3): each SAM pixel written 2×.
+    // Border pixels (left OFF_X and right OFF_X columns) zeroed at Init().
+    // Active area [OFF_X*3 .. (OFF_X+SCALED_W)*3): SAM pixels expanded 2×.
     alignas(4) uint8_t m_row_buf[DST_W * 3];   // 3840 bytes
 
     // Previous frame snapshot for dirty detection (DRAM, 512×192 = 98304 bytes).
@@ -177,7 +176,7 @@ bool ESP32Video::Init()
     BuildPalette();
     memset(m_prev, 0xFF, sizeof(m_prev));
     m_initialized = true;
-    ESP_LOGI(TAG, "ESP32Video: %dx%d display, SAM %dx%d -> 2xH 3xV -> %dx%d centred (OFF_X=%d OFF_Y=%d, 720p@60Hz)",
+    ESP_LOGI(TAG, "ESP32Video: %dx%d (720p), SAM %dx%d -> 2xH 3xV -> %dx%d centred (OFF_X=%d OFF_Y=%d)",
              DST_W, DST_H, SAM_W, SAM_H, SCALED_W, SCALED_H, OFF_X, OFF_Y);
     return true;
 }
@@ -235,14 +234,12 @@ void ESP32Video::Update(const FrameBuffer& fb)
 
     if (is_gui)
     {
-        // GUI: 512×384 source → 2×H 1×V → 1024×384, centred in 1280×720.
-        // m_row_buf border pixels are pre-zeroed (black) — only active area written.
-        // src_h=384, 1×V → 384 display rows, starting at OFF_Y.
-        const int rows = (src_h <= DST_H - OFF_Y) ? src_h : DST_H - OFF_Y;
+        // GUI: 512×384 → 2×H 1×V → 1024×384, centred en 1280×720 (OFF_Y=168).
+        const int gui_off_y = (DST_H - src_h) / 2;
+        const int rows = (src_h <= DST_H) ? src_h : DST_H;
         for (int sy = 0; sy < rows; ++sy)
         {
             const uint8_t* src_line = fb.GetLine(sy);
-            // Expand 2×H into active area of m_row_buf
             uint8_t* p = m_row_buf + OFF_X * 3;
             for (int sx = 0; sx < src_w; ++sx)
             {
@@ -250,25 +247,17 @@ void ESP32Video::Update(const FrameBuffer& fb)
                 *p++ = e.r; *p++ = e.g; *p++ = e.b;
                 *p++ = e.r; *p++ = e.g; *p++ = e.b;
             }
-            // 1×V — one display row per source row, starting at OFF_Y
-            memcpy(dst + (OFF_Y + sy) * DST_STRIDE, m_row_buf, DST_STRIDE);
+            memcpy(dst + (gui_off_y + sy) * DST_STRIDE, m_row_buf, DST_STRIDE);
         }
-        // Flush active GUI area and present.
-        sim_display_flush_region((size_t)OFF_Y * DST_STRIDE,
+        sim_display_flush_region((size_t)gui_off_y * DST_STRIDE,
                                  (size_t)rows * DST_STRIDE);
         sim_display_swap();
     }
     else
     {
-        // Normal framebuffer: 512×192 → 2×H 3×V → 1024×576, centred in 1280×720.
-        //
-        // m_row_buf border pixels are pre-zeroed (black) — only active area written.
-        // Each SAM pixel written 2× horizontally into m_row_buf active area,
-        // then the full row (including black borders) copied 3× vertically.
-        //
-        // Dirty-line tracking: only expand+blit rows that changed.
-        // Each dirty row is written to BOTH framebuffers (back and front)
-        // so both stay in sync — safe with double buffering.
+        // Normal: 512×192 → 2×H 3×V → 1024×576, centred (OFF_X=128, OFF_Y=72).
+        // Each dirty SAM row expanded into m_row_buf then copied 3× into PSRAM.
+        // Written to both framebuffers to keep double-buffer in sync.
         void* fb0_ptr = nullptr;
         void* fb1_ptr = nullptr;
         sim_display_get_framebuffer(&fb0_ptr, &fb1_ptr);
@@ -287,7 +276,7 @@ void ESP32Video::Update(const FrameBuffer& fb)
 
             memcpy(prev_line, src_line, src_w);
 
-            // Expand 2×H into active area of m_row_buf
+            // Expand 2×H into active area of m_row_buf (borders stay black)
             if (vdiag) s_expand_us -= esp_timer_get_time();
             uint8_t* p = m_row_buf + OFF_X * 3;
             for (int sx = 0; sx < src_w; ++sx)
@@ -301,11 +290,9 @@ void ESP32Video::Update(const FrameBuffer& fb)
             // Copy 3×V into framebuffer at OFF_Y + sy*3
             if (vdiag) s_copy_us -= esp_timer_get_time();
             int dy0 = OFF_Y + sy * 3;
-            // Write to back buffer
             memcpy(dst + dy0       * DST_STRIDE, m_row_buf, DST_STRIDE);
             memcpy(dst + (dy0 + 1) * DST_STRIDE, m_row_buf, DST_STRIDE);
             memcpy(dst + (dy0 + 2) * DST_STRIDE, m_row_buf, DST_STRIDE);
-            // Write to front buffer too — keeps both in sync
             if (other) {
                 memcpy(other + dy0       * DST_STRIDE, m_row_buf, DST_STRIDE);
                 memcpy(other + (dy0 + 1) * DST_STRIDE, m_row_buf, DST_STRIDE);

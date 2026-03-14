@@ -53,11 +53,11 @@ menu "SimCoupe Display (LT8912B HDMI Bridge)"
 
     config SIM_DISPLAY_DSI_LANE_MBPS
         int "DSI lane bit rate (Mbps)"
-        default 1000
+        default 896
         help
             MIPI DSI bit rate per lane in Mbps.
             Must satisfy: lane_mbps >= pclk_mhz * 24 / num_lanes (with margin).
-            1280x720@64MHz/2lanes: 64*24/2=768 Mbps → 1000 Mbps matches production test.
+            1024x768@60MHz/2lanes: 60*24/2=720 Mbps → 896 Mbps matches production test.
 
     # ---------------------------------------------------------------
     # Video timing — single source of truth for all timing parameters.
@@ -65,29 +65,30 @@ menu "SimCoupe Display (LT8912B HDMI Bridge)"
 
     config SIM_DISPLAY_HACT
         int "Horizontal active pixels"
-        default 1280
+        default 1024
         help
-            Horizontal active pixel count (e.g. 1280 for 1280x720).
+            Horizontal active pixel count (e.g. 1024 for 1024x768).
 
     config SIM_DISPLAY_VACT
         int "Vertical active lines"
-        default 720
+        default 768
         help
-            Vertical active line count (e.g. 720 for 1280x720).
+            Vertical active line count (e.g. 768 for 1024x768).
 
     config SIM_DISPLAY_PCLK_MHZ
         int "Pixel clock (MHz)"
-        default 64
+        default 60
         help
             Pixel clock in MHz. Passed to esp_lcd_new_panel_dpi() as
-            dpi_clock_freq_mhz. For 1280x720 reduced-blanking (Olimex
-            production test timings), use 64 MHz with MIPI_DSI_DPI_CLK_SRC_DEFAULT.
+            dpi_clock_freq_mhz. For 1024x768@60Hz (Olimex production test
+            timings), use 60 MHz with MIPI_DSI_DPI_CLK_SRC_DEFAULT.
 
     config SIM_DISPLAY_HS
         int "Horizontal sync width (pixels)"
-        default 32
+        default 8
         help
             Horizontal sync pulse width in pixels.
+            1024x768@60Hz: hs=8, htotal=1024+8+48+140=1220.
 
     config SIM_DISPLAY_HFP
         int "Horizontal front porch (pixels)"
@@ -97,13 +98,13 @@ menu "SimCoupe Display (LT8912B HDMI Bridge)"
 
     config SIM_DISPLAY_HBP
         int "Horizontal back porch (pixels)"
-        default 80
+        default 140
         help
             Horizontal back porch in pixels.
 
     config SIM_DISPLAY_VS
         int "Vertical sync width (lines)"
-        default 5
+        default 6
         help
             Vertical sync pulse width in lines.
 
@@ -115,9 +116,10 @@ menu "SimCoupe Display (LT8912B HDMI Bridge)"
 
     config SIM_DISPLAY_VBP
         int "Vertical back porch (lines)"
-        default 13
+        default 42
         help
             Vertical back porch in lines.
+            1024x768@60Hz: vbp=42, vtotal=768+6+3+42=819.
 
     config SIM_DISPLAY_HSYNC_POL
         int "Horizontal sync polarity (1=positive, 0=negative)"
@@ -126,33 +128,45 @@ menu "SimCoupe Display (LT8912B HDMI Bridge)"
 
     config SIM_DISPLAY_VSYNC_POL
         int "Vertical sync polarity (1=positive, 0=negative)"
-        default 0
+        default 1
         range 0 1
+
+    config SIM_DISPLAY_VIC
+        int "CEA-861 Video Identification Code (VIC)"
+        default 4
+        help
+            VIC for the AVI InfoFrame. Standard values:
+            0  = no specific mode (use for non-CEA modes like 1024x768)
+            4  = 1280x720@60Hz (720p)
+            16 = 1920x1080@60Hz (1080p)
+            2  = 720x480@60Hz (480p 4:3)
 
     config SIM_DISPLAY_SETTLE
         hex "MIPI DSI settle register (0x49:0x11)"
-        default 0x10
+        default 0x0A
         help
             MIPI DSI settle time register value.
-            Olimex production test uses 0x10 for 1280x720.
+            Linux kernel rule: 0x04 for vactive<=600, 0x08 for <=900, 0x0a for >900.
+            Use 0x0A for 720p/1080p.
 
     config SIM_DISPLAY_DDS_0
         hex "DDS frequency word byte 0 (LSB, reg 0x4E)"
-        default 0x93
+        default 0xAC
         help
-            strm_sw_freq_word[7:0]. Espressif official value: 0x93.
+            strm_sw_freq_word[7:0]. Formula: pclk_mhz * 0x16C16.
+            720p@74MHz: 74 * 0x16C16 = 0x6D28AC → byte0=0xAC.
 
     config SIM_DISPLAY_DDS_1
         hex "DDS frequency word byte 1 (reg 0x4F)"
-        default 0x3E
+        default 0x28
         help
-            strm_sw_freq_word[15:8]. Espressif official value: 0x3E.
+            strm_sw_freq_word[15:8]. 720p@74MHz → byte1=0x28.
 
     config SIM_DISPLAY_DDS_2
         hex "DDS frequency word byte 2 (MSB, reg 0x50)"
-        default 0x29
+        default 0x6D
         help
-            strm_sw_freq_word[23:16]. Espressif official value: 0x29.
+            strm_sw_freq_word[23:16]. 720p@74MHz → byte2=0x6D.
 
     endif # SIM_DISPLAY_ENABLED
 

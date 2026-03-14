@@ -196,20 +196,30 @@ esp_err_t sim_display_init(void)
      * start as zero in the cache, but the DMA reads physical PSRAM which may
      * still contain stale data.  Flush cache → PSRAM before panel enable. */
     ESP_LOGI(TAG, "step 5 — clear framebuffers + panel enable");
-    if (esp_lcd_dpi_panel_get_frame_buffer(s_panel, 2, &s_fb[0], &s_fb[1]) == ESP_OK) {
-        size_t fb_size = CONFIG_SIM_DISPLAY_HACT * CONFIG_SIM_DISPLAY_VACT * 3;  /* RGB888 */
-        for (int i = 0; i < 2; i++) {
-            if (s_fb[i]) {
-                memset(s_fb[i], 0, fb_size);
-                esp_cache_msync(s_fb[i], fb_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-            }
+    size_t fb_size = CONFIG_SIM_DISPLAY_HACT * CONFIG_SIM_DISPLAY_VACT * 3;  /* RGB888 */
+    /* Try to get both framebuffers; fall back to 1 if panel was created with num_fbs=1 */
+    if (esp_lcd_dpi_panel_get_frame_buffer(s_panel, 2, &s_fb[0], &s_fb[1]) != ESP_OK) {
+        esp_lcd_dpi_panel_get_frame_buffer(s_panel, 1, &s_fb[0]);
+        s_fb[1] = NULL;
+    }
+    for (int i = 0; i < 2; i++) {
+        if (s_fb[i]) {
+            memset(s_fb[i], 0, fb_size);
+            esp_cache_msync(s_fb[i], fb_size,
+                ESP_CACHE_MSYNC_FLAG_DIR_C2M |
+                ESP_CACHE_MSYNC_FLAG_TYPE_DATA |
+                ESP_CACHE_MSYNC_FLAG_UNALIGNED);
         }
     }
 
     esp_lcd_panel_init(s_panel);
     esp_lcd_panel_disp_on_off(s_panel, true);
 
-    ESP_LOGI(TAG, "single framebuffer at %p", s_fb[0]);
+    ESP_LOGI(TAG, "framebuffers: fb0=%p fb1=%p (size=%u KB each)",
+             s_fb[0], s_fb[1], (unsigned)(fb_size / 1024));
+    if (!s_fb[1]) {
+        ESP_LOGW(TAG, "WARNING: only 1 framebuffer — double buffering disabled, expect tearing");
+    }
 
     /* Read LT8912B diagnostic regs to confirm DSI is active */
     esp_lcd_lt8912b_post_dpi_enable();
@@ -238,16 +248,19 @@ esp_err_t sim_display_get_framebuffer(void **fb0, void **fb1)
 void *sim_display_get_back_buffer(void)
 {
     if (!s_panel) return NULL;
+    /* If only 1 FB, always return fb[0] */
+    if (!s_fb[1]) return s_fb[0];
     return s_fb[s_back_buf];
 }
 
 esp_err_t sim_display_flush(void)
 {
     if (!s_panel) return ESP_ERR_INVALID_STATE;
+    void *buf = s_fb[1] ? s_fb[s_back_buf] : s_fb[0];
     size_t fb_size = CONFIG_SIM_DISPLAY_HACT * CONFIG_SIM_DISPLAY_VACT * 3;
-    esp_cache_msync(s_fb[s_back_buf], fb_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    esp_cache_msync(buf, fb_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
     dpi_set_cur_fb(s_panel, (uint8_t)s_back_buf);
-    s_back_buf ^= 1;
+    if (s_fb[1]) s_back_buf ^= 1;
     return ESP_OK;
 }
 
@@ -264,6 +277,7 @@ esp_err_t sim_display_swap(void)
 {
     if (!s_panel) return ESP_ERR_INVALID_STATE;
     dpi_set_cur_fb(s_panel, (uint8_t)s_back_buf);
-    s_back_buf ^= 1;
+    /* Only alternate if we have 2 FBs */
+    if (s_fb[1]) s_back_buf ^= 1;
     return ESP_OK;
 }
